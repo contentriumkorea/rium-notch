@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="560" viewBox="0 0 1600 560" role="img" aria-labelledby="title desc">
+<title id="title">Rium Notch</title><desc id="desc">어두운 화면 위 노치와 푸른 빛을 표현한 프로젝트 커버</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101928"/><stop offset="1" stop-color="#05070d"/></linearGradient><radialGradient id="glow"><stop stop-color="#35a9ff" stop-opacity=".55"/><stop offset="1" stop-color="#35a9ff" stop-opacity="0"/></radialGradient></defs>
+<rect width="1600" height="560" fill="url(#bg)"/><ellipse cx="800" cy="48" rx="470" ry="180" fill="url(#glow)"/><path d="M625 0h350v52q0 23-23 23H648q-23 0-23-23z" fill="#000"/><text x="800" y="286" text-anchor="middle" fill="#f4f8ff" font-family="-apple-system, sans-serif" font-size="92" font-weight="700">Rium Notch</text><text x="800" y="350" text-anchor="middle" fill="#aabed1" font-family="-apple-system, sans-serif" font-size="30">macOS 노치에 담는 나만의 작업 공간</text></svg>

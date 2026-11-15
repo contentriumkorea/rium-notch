@@ -1,0 +1,8 @@
+.DS_Store
+/build/
+/core/target/
+/resources/appearance/
+/resources/mediaremote-adapter/
+/Glance*REA.json
+/Rium Notch 실행 화면.png
+/구현 현황.md

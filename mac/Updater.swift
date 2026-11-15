@@ -1,0 +1,83 @@
+import AppKit
+import Foundation
+import Combine
+
+/// Checks public GitHub releases. Installation is deliberately left to the user.
+final class UpdateController: ObservableObject {
+    private static let api = URL(string: "https://api.github.com/repos/contentriumkorea/rium-notch/releases/latest")!
+    private static let releasePrefix = "/contentriumkorea/rium-notch/releases/tag/"
+    @Published private(set) var status = "GitHub에서 업데이트를 확인합니다."
+    @Published private(set) var checking = false
+    @Published private(set) var releaseURL: URL?
+    @Published private(set) var autoCheck: Bool
+    private let defaults: UserDefaults
+    private var timer: Timer?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.autoCheck = defaults.object(forKey: "rium.update.autoCheck") as? Bool ?? true
+    }
+    func start() {
+        if autoCheck { checkIfDue() }
+        timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            guard let self = self, self.autoCheck else { return }
+            self.checkIfDue()
+        }
+    }
+    func setAutoCheck(_ value: Bool) {
+        autoCheck = value
+        defaults.set(value, forKey: "rium.update.autoCheck")
+        if value { checkIfDue() }
+    }
+    private func checkIfDue() {
+        if Date().timeIntervalSince1970 - defaults.double(forKey: "rium.update.lastCheck") >= 86400 { check() }
+    }
+    func check() {
+        guard !checking else { return }
+        checking = true
+        status = "업데이트 확인 중…"
+        var request = URLRequest(url: Self.api, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Rium-Notch", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            let result: (String, URL?)
+            if error != nil { result = ("업데이트 확인에 실패했습니다. 네트워크를 확인해 주세요.", nil) }
+            else if let http = response as? HTTPURLResponse, http.statusCode == 404 { result = ("아직 공개된 릴리스가 없습니다.", nil) }
+            else if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                    let data = data, data.count <= 1_048_576 {
+                result = Self.parse(data, current: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0")
+            } else { result = ("업데이트 정보를 확인할 수 없습니다.", nil) }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.checking = false; self.status = result.0; self.releaseURL = result.1
+                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 404 {
+                    self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
+                }
+            }
+        }.resume()
+    }
+    static func parse(_ data: Data, current: String) -> (String, URL?) {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              json["draft"] as? Bool == false, json["prerelease"] as? Bool == false,
+              let tag = json["tag_name"] as? String, let remote = version(tag), let local = version(current),
+              let raw = json["html_url"] as? String, let url = URL(string: raw),
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme == "https", parts.host?.lowercased() == "github.com", parts.user == nil, parts.password == nil,
+              parts.port == nil, parts.query == nil, parts.fragment == nil,
+              parts.path == releasePrefix + tag else { return ("릴리스 정보를 읽을 수 없습니다.", nil) }
+        if remote.lexicographicallyPrecedes(local) || remote == local { return ("최신 릴리스: \(tag)", url) }
+        return ("새 릴리스: \(tag) · 릴리스 페이지에서 내용을 확인하세요.", url)
+    }
+    static func version(_ raw: String) -> [Int]? {
+        let text = raw.hasPrefix("v") ? String(raw.dropFirst()) : raw
+        let items = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard items.count == 3 else { return nil }
+        var result: [Int] = []
+        for item in items {
+            guard !item.isEmpty, item.count <= 9, item.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(item) else { return nil }
+            result.append(n)
+        }
+        return result
+    }
+    func openRelease() { if let url = releaseURL { NSWorkspace.shared.open(url) } }
+}
