@@ -9,6 +9,21 @@ use std::time::{Duration, SystemTime};
 const TAIL_BYTES: u64 = 256 * 1024;
 const MAX_HOOK_BYTES: u64 = 64 * 1024;
 const HOOK_FRESHNESS_MS: u64 = 30_000;
+fn tool_activity(name: &str) -> &'static str {
+    let name = name.to_ascii_lowercase();
+    if name.contains("web") || name.contains("browser") { "웹 확인" }
+    else if name.contains("apply_patch") || matches!(name.as_str(), "edit" | "write" | "multiedit") { "파일 수정" }
+    else if matches!(name.as_str(), "read" | "grep" | "glob") { "파일 확인" }
+    else if name.contains("exec") || name.contains("terminal") || name == "bash" { "작업 실행" }
+    else { "도구 사용" }
+}
+
+fn remember_activity(actions: &mut VecDeque<&'static str>, name: &str) -> &'static str {
+    let action = tool_activity(name);
+    if actions.len() == 3 { actions.pop_front(); }
+    actions.push_back(action);
+    action
+}
 fn valid_session_id(id: &str) -> bool {
     id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
@@ -70,9 +85,7 @@ fn activity(meta: &Value, lines: impl Iterator<Item = Value>, recently_modified:
             match subtype { "task_started" => { state = "작업 중"; action = ""; recent_actions.clear(); }, "task_complete" => { state = "완료"; action = ""; }, "turn_aborted" => { state = "중단됨"; action = ""; }, _ => {} }
         } else if kind == "response_item" && matches!(subtype, "function_call" | "custom_tool_call") {
             let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
-            action = if name.contains("exec") { "작업 실행" } else if name.contains("web") { "웹 확인" } else if name.contains("apply_patch") { "파일 수정" } else { "도구 사용" };
-            if recent_actions.len() == 3 { recent_actions.pop_front(); }
-            recent_actions.push_back(action);
+            action = remember_activity(&mut recent_actions, name);
         }
     }
     // A long-running turn can start before the bounded tail. Recent tool
@@ -92,6 +105,7 @@ fn claude_activity(id: &str, lines: impl Iterator<Item = Value>, recently_modifi
     let mut project = String::from("Claude");
     let mut state = "최근 활동";
     let mut seen = false;
+    let mut recent_actions = VecDeque::with_capacity(3);
     for record in lines {
         if record.get("sessionId").and_then(Value::as_str) != Some(id)
             || record.get("isSidechain").and_then(Value::as_bool) == Some(true) { continue; }
@@ -104,15 +118,24 @@ fn claude_activity(id: &str, lines: impl Iterator<Item = Value>, recently_modifi
         let message = &record["message"];
         if kind == "assistant" {
             seen = true;
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                for item in content {
+                    if item.get("type").and_then(Value::as_str) == Some("tool_use") {
+                        if let Some(name) = item.get("name").and_then(Value::as_str) {
+                            remember_activity(&mut recent_actions, name);
+                        }
+                    }
+                }
+            }
             state = if message.get("stop_reason").and_then(Value::as_str) == Some("end_turn") { "완료" }
                 else if recently_modified { "활동 감지" } else { "최근 활동" };
         } else {
             let tool_result = message.get("content").and_then(Value::as_array)
                 .is_some_and(|items| items.iter().any(|item| item.get("type").and_then(Value::as_str) == Some("tool_result")));
-            if !tool_result { seen = true; state = if recently_modified { "활동 감지" } else { "최근 활동" }; }
+            if !tool_result { seen = true; recent_actions.clear(); state = if recently_modified { "활동 감지" } else { "최근 활동" }; }
         }
     }
-    seen.then(|| json!({"id":format!("claude-{id}"),"source":"claude","project":project,"state":state,"activity":""}))
+    seen.then(|| json!({"id":format!("claude-{id}"),"source":"claude","project":project,"state":state,"activity":"", "activities":recent_actions}))
 }
 
 fn inspect_claude(path: &Path, now: SystemTime) -> Option<Value> {
@@ -128,7 +151,9 @@ fn inspect_claude(path: &Path, now: SystemTime) -> Option<Value> {
     let mut tail = BufReader::new(file.take(TAIL_BYTES));
     if offset > 0 { let mut skipped = Vec::new(); tail.read_until(b'\n', &mut skipped).ok()?; }
     let lines = tail.lines().map_while(Result::ok).filter_map(|line| serde_json::from_str::<Value>(&line).ok());
-    claude_activity(id, lines, age <= Duration::from_secs(30))
+    let mut row = claude_activity(id, lines, age <= Duration::from_secs(30))?;
+    row["ageSeconds"] = json!(age.as_secs());
+    Some(row)
 }
 
 fn recent_claude(root: &Path, now: SystemTime) -> Vec<Value> {
@@ -278,5 +303,23 @@ mod tests {
         assert_eq!(rows[0]["id"], format!("claude-{id}"));
         assert!(!rows[0].to_string().contains("private fixture"));
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn claude_tool_activity_is_bounded_and_does_not_expose_tool_input() {
+        let id = "01234567-89ab-cdef-0123-456789abcdef";
+        let user = json!({"type":"user","sessionId":id,"message":{"content":"private prompt"}});
+        let tools = json!({"type":"assistant","sessionId":id,"message":{"stop_reason":"tool_use","content":[
+            {"type":"tool_use","name":"Read","input":{"file_path":"private path"}},
+            {"type":"tool_use","name":"Bash","input":{"command":"private command"}},
+            {"type":"tool_use","name":"Edit","input":{"new_string":"private text"}},
+            {"type":"tool_use","name":"WebSearch","input":{"query":"private query"}}
+        ]}});
+        let row = claude_activity(id, vec![user.clone(), tools.clone()].into_iter(), true).unwrap();
+        assert_eq!(row["activities"], json!(["작업 실행", "파일 수정", "웹 확인"]));
+        assert!(!row.to_string().contains("private"));
+        let row = claude_activity(id, vec![user.clone(), tools, user].into_iter(), true).unwrap();
+        assert_eq!(row["activities"], json!([]));
+        assert_eq!(tool_activity("Read"), "파일 확인");
+        assert_eq!(tool_activity("mcp__functions__apply_patch"), "파일 수정");
     }
 }

@@ -1143,7 +1143,7 @@ final class Model: ObservableObject {
             if let rows = event["data"] as? [[String: Any]] {
                 let updated: [AgentActivity] = rows.compactMap { row in
                     guard let id = row["id"] as? String, let project = row["project"] as? String, let state = row["state"] as? String else { return nil }
-                    let knownActions: Set<String> = ["작업 실행", "웹 확인", "파일 수정", "도구 사용"]
+                    let knownActions: Set<String> = ["작업 실행", "웹 확인", "파일 수정", "파일 확인", "도구 사용"]
                     let actions = (row["activities"] as? [String] ?? []).filter { knownActions.contains($0) }
                     return AgentActivity(id: id, project: project, state: state, activity: row["activity"] as? String ?? "", source: row["source"] as? String == "claude" ? "claude" : "codex", recentActivities: Array(actions.suffix(3)), ageSeconds: row["ageSeconds"] as? UInt64)
                 }
@@ -2153,7 +2153,7 @@ struct AgentView: View {
                         }
                         HStack(spacing: 6) {
                             ForEach(Array(item.recentActivities.enumerated()), id: \.offset) { _, activity in
-                                Label(activity, systemImage: activity == "웹 확인" ? "globe" : (activity == "파일 수정" ? "pencil" : "terminal"))
+                                Label(activity, systemImage: activity == "웹 확인" ? "globe" : (activity == "파일 수정" ? "pencil" : (activity == "파일 확인" ? "doc.text.magnifyingglass" : "terminal")))
                                     .font(.caption).lineLimit(1).padding(.horizontal, 7).padding(.vertical, 4)
                                     .background(.white.opacity(0.06), in: Capsule())
                             }
@@ -3669,7 +3669,10 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
     }
     if CommandLine.arguments.contains("--self-test-render-agent-view") {
         model.section = .agents
-        model.agentItems = [AgentActivity(id: "01234567-89ab-cdef-0123-456789abcdef", project: "Rium Notch", state: "활동 감지", activity: "도구 사용", recentActivities: ["작업 실행", "파일 수정", "도구 사용"], ageSeconds: 8)]
+        model.agentItems = [
+            AgentActivity(id: "01234567-89ab-cdef-0123-456789abcdef", project: "Rium Notch", state: "활동 감지", activity: "도구 사용", recentActivities: ["작업 실행", "파일 수정", "도구 사용"], ageSeconds: 8),
+            AgentActivity(id: "claude-01234567-89ab-cdef-0123-456789abcdef", project: "예시 프로젝트", state: "활동 감지", activity: "", source: "claude", recentActivities: ["파일 확인", "파일 수정", "웹 확인"], ageSeconds: 12)
+        ]
     }
     if CommandLine.arguments.contains("--self-test-render-artwork-home") || CommandLine.arguments.contains("--self-test-render-music-view") || CommandLine.arguments.contains("--self-test-render-lyrics-view") {
         let artwork = NSImage(size: NSSize(width: 120, height: 120))
