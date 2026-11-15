@@ -2754,7 +2754,29 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
           UpdateController.parse(release("v1.2.3", "https://evil.example/contentriumkorea/rium-notch/releases/tag/v1.2.3"), current: "1.0.0").1 == nil,
           UpdateController.parse(release("v1.2.3", "https://github.com/contentriumkorea/rium-notch/releases/tag/v1.2.3", prerelease: true), current: "1.0.0").1 == nil,
           UpdateController.version("v1.2.3-beta") == nil else { fatalError("updater validation failed") }
-    print("updater release and URL validation self-test passed")
+    guard UpdateController.isDue(last: 0, now: 100),
+          !UpdateController.isDue(last: 100, now: 100 + 86399),
+          UpdateController.isDue(last: 100, now: 100 + 86400),
+          UpdateController.isDue(last: 200, now: 100) else { fatalError("updater schedule failed") }
+    let suite = "app.rium.notch.updater-test.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { fatalError("updater test preferences unavailable") }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/contentriumkorea/rium-notch/releases/latest")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    var requests = 0
+    let updater = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in requests += 1; done(good, response, nil) })
+    updater.start()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    guard requests == 1, updater.status.hasPrefix("새 릴리스"), updater.releaseURL != nil else { fatalError("automatic update check failed") }
+    let restored = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, _ in requests += 1 })
+    restored.start()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    guard requests == 1, restored.status.hasPrefix("새 릴리스"), restored.releaseURL != nil else { fatalError("update cache or throttle failed") }
+    defaults.removeObject(forKey: "rium.update.lastCheck")
+    let malformed = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in done(Data("{}".utf8), response, nil) })
+    malformed.check()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    guard defaults.double(forKey: "rium.update.lastCheck") == 0, malformed.releaseURL != nil else { fatalError("invalid response suppressed retry or erased cached release") }
+    print("updater release, automatic scheduling, cache and retry self-test passed")
 } else if CommandLine.arguments.contains("--self-test-media-order") {
     struct MediaRequestFixture { let action: String; let done: ([String: Any]) -> Void }
     var requests: [MediaRequestFixture] = []

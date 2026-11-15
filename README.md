@@ -2,13 +2,17 @@
 <h1 align="center">Rium Notch</h1>
 <p align="center"><strong>macOS 노치에 담는 나만의 작업 공간</strong><br>음악, 에이전트 상태와 자주 쓰는 도구를 노치에서 만나는 오픈소스 앱</p>
 <p align="center"><a href="https://github.com/contentriumkorea/rium-notch/releases"><img src="https://img.shields.io/github/v/release/contentriumkorea/rium-notch" alt="Latest release"></a> <img src="https://img.shields.io/badge/macOS-14%2B%20%7C%20Apple%20silicon-blue" alt="macOS 14 이상, Apple silicon"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a></p>
-<p align="center"><a href="#빠르게-시작하기">빌드하기</a> · <a href="https://github.com/contentriumkorea/rium-notch/releases">릴리스</a> · <a href="#사용-모습">사용 모습</a> · <a href="docs/BUILD.md">상세 안내</a></p>
+<p align="center"><a href="#빠르게-시작하기">빌드하기</a> · <a href="https://github.com/contentriumkorea/rium-notch/releases/latest">Mac 다운로드</a> · <a href="#사용-모습">사용 모습</a> · <a href="docs/BUILD.md">상세 안내</a></p>
 
 ---
 
 ## 빠르게 시작하기
 
-Apple silicon Mac, macOS 14 이상, Xcode Command Line Tools, Rust와 CMake가 필요합니다.
+[Mac용 DMG 다운로드 (Apple silicon) →](https://github.com/contentriumkorea/rium-notch/releases/latest/download/Rium-Notch-macOS-arm64-unsigned.dmg)
+
+macOS 14 이상의 Apple silicon Mac을 대상으로 한 미리보기입니다. DMG의 앱을 Applications 폴더에 복사하세요. **Apple Developer ID 서명과 공증이 없어 macOS가 다운로드한 앱의 실행을 차단할 수 있습니다.** 다른 Mac에서 설치와 실행은 검증하지 않았습니다.
+
+직접 빌드하려면 Xcode Command Line Tools, Rust와 CMake가 필요합니다.
 
 ```sh
 git clone https://github.com/contentriumkorea/rium-notch.git
@@ -44,8 +48,9 @@ open '../Rium Notch.app'
 
 | 방식 | 사용 방법 |
 | :--- | :--- |
+| macOS DMG | [최신 릴리스](https://github.com/contentriumkorea/rium-notch/releases/latest)에서 Apple silicon용 미리보기를 받습니다. 서명·공증되지 않았습니다. |
 | 소스 빌드 | 이 저장소를 내려받아 직접 빌드합니다. |
-| GitHub 릴리스 | 버전별 소스와 변경 내용을 제공합니다. 서명·공증된 설치 파일은 아직 제공하지 않습니다. |
+| GitHub 릴리스 | 버전별 변경 내용과 미리보기 DMG를 제공합니다. 서명·공증된 설치 파일은 아직 제공하지 않습니다. |
 
 ## 이렇게 사용하세요
 
@@ -61,7 +66,7 @@ open '../Rium Notch.app'
 
 <details><summary><strong>English overview</strong></summary>
 
-Rium Notch is an in-development macOS notch utility for Apple silicon. It includes media, agent status and quick tools. Build from source; signed and notarized installers and automatic installation are not available yet.
+Rium Notch is an in-development macOS notch utility for Apple silicon. It includes media, agent status and quick tools. An unsigned DMG is available; signed and notarized installers and automatic installation are not available yet.
 
 </details>
 

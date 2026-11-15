@@ -10,12 +10,21 @@ final class UpdateController: ObservableObject {
     @Published private(set) var checking = false
     @Published private(set) var releaseURL: URL?
     @Published private(set) var autoCheck: Bool
+    typealias Fetch = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
     private let defaults: UserDefaults
+    private let fetch: Fetch
+    private let currentVersion: String
     private var timer: Timer?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, currentVersion: String? = nil, fetch: @escaping Fetch = { request, done in URLSession.shared.dataTask(with: request, completionHandler: done).resume() }) {
         self.defaults = defaults
+        self.fetch = fetch
+        self.currentVersion = currentVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0")
         self.autoCheck = defaults.object(forKey: "rium.update.autoCheck") as? Bool ?? true
+        if let cached = defaults.data(forKey: "rium.update.cachedRelease") {
+            let result = Self.parse(cached, current: self.currentVersion)
+            if result.1 != nil { self.status = result.0; self.releaseURL = result.1 }
+        }
     }
     func start() {
         if autoCheck { checkIfDue() }
@@ -30,7 +39,10 @@ final class UpdateController: ObservableObject {
         if value { checkIfDue() }
     }
     private func checkIfDue() {
-        if Date().timeIntervalSince1970 - defaults.double(forKey: "rium.update.lastCheck") >= 86400 { check() }
+        if Self.isDue(last: defaults.double(forKey: "rium.update.lastCheck"), now: Date().timeIntervalSince1970) { check() }
+    }
+    static func isDue(last: Double, now: Double) -> Bool {
+        !last.isFinite || last <= 0 || last > now || now - last >= 86400
     }
     func check() {
         guard !checking else { return }
@@ -39,23 +51,40 @@ final class UpdateController: ObservableObject {
         var request = URLRequest(url: Self.api, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Rium-Notch", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            let result: (String, URL?)
-            if error != nil { result = ("업데이트 확인에 실패했습니다. 네트워크를 확인해 주세요.", nil) }
-            else if let http = response as? HTTPURLResponse, http.statusCode == 404 { result = ("아직 공개된 릴리스가 없습니다.", nil) }
-            else if let http = response as? HTTPURLResponse, http.statusCode == 200,
-                    let data = data, data.count <= 1_048_576 {
-                result = Self.parse(data, current: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0")
-            } else { result = ("업데이트 정보를 확인할 수 없습니다.", nil) }
+        fetch(request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.checking = false; self.status = result.0; self.releaseURL = result.1
-                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 404 {
-                    self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
+                defer { self.checking = false }
+                guard error == nil, let http = response as? HTTPURLResponse else {
+                    self.status = "업데이트 확인에 실패했습니다. 네트워크를 확인해 주세요."
+                    return
                 }
+                if http.statusCode == 404 {
+                    self.status = "아직 공개된 릴리스가 없습니다."
+                    self.releaseURL = nil
+                    self.defaults.removeObject(forKey: "rium.update.cachedRelease")
+                    self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
+                    return
+                }
+                guard http.statusCode == 200, let data = data, data.count <= 1_048_576 else {
+                    self.status = "업데이트 정보를 확인할 수 없습니다."
+                    return
+                }
+                let result = Self.parse(data, current: self.currentVersion)
+                guard let url = result.1,
+                      let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let tag = json["tag_name"] as? String,
+                      let cached = try? JSONSerialization.data(withJSONObject: ["tag_name": tag, "html_url": url.absoluteString, "draft": false, "prerelease": false]) else {
+                    self.status = "릴리스 정보를 읽을 수 없습니다."
+                    return
+                }
+                self.status = result.0; self.releaseURL = url
+                self.defaults.set(cached, forKey: "rium.update.cachedRelease")
+                self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
             }
-        }.resume()
+        }
     }
+
     static func parse(_ data: Data, current: String) -> (String, URL?) {
         guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               json["draft"] as? Bool == false, json["prerelease"] as? Bool == false,

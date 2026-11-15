@@ -150,7 +150,7 @@ impl Server {
             match line { Ok(s) => if let Ok(v) = serde_json::from_str::<Value>(&s) { if tx.send(v).is_err() { break; } }, Err(_) => break }
         });
         let mut s = Self { child, input, incoming:rx, pending:Vec::new() };
-        s.send(json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"menu_bar_workspace","title":"Menu Bar Workspace","version":"0.1.0"}}}))?;
+        s.send(json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"menu_bar_workspace","title":"Menu Bar Workspace","version":env!("CARGO_PKG_VERSION")}}}))?;
         s.response(1,Duration::from_secs(15))?;
         s.send(json!({"method":"initialized","params":{}}))?;
         Ok(s)

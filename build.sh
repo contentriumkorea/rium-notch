@@ -2,6 +2,11 @@
 set -euo pipefail
 cd "${0:A:h}"
 export MACOSX_DEPLOYMENT_TARGET=14.0
+app_version="$(< VERSION)"
+if [[ ! "$app_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+    print -u2 "VERSION 형식이 올바르지 않습니다."
+    exit 1
+fi
 cargo build --release --locked --manifest-path core/Cargo.toml
 cmake -S resources/vendor/mediaremote-adapter -B build/mediaremote -DCMAKE_BUILD_TYPE=Release
 cmake --build build/mediaremote --target MediaRemoteAdapter
@@ -22,6 +27,7 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 swiftc -O -target arm64-apple-macosx14.0 mac/main.swift mac/NotchLight.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/Dictation.swift mac/Teleprompter.swift mac/Power.swift mac/Settings.swift mac/Updater.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -framework AppKit -framework SwiftUI -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ServiceManagement -framework CoreServices -framework UserNotifications
 cp core/target/release/rium-notch-core "$bundle/Contents/MacOS/rium-notch-core"
 cp resources/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/Contents/Resources/"
 mkdir -p "$bundle/Contents/Resources/mediaremote-adapter"
 cp resources/vendor/mediaremote-adapter/bin/mediaremote-adapter.pl "$bundle/Contents/Resources/mediaremote-adapter/"
 cp resources/vendor/mediaremote-adapter/LICENSE "$bundle/Contents/Resources/mediaremote-adapter/"
@@ -36,7 +42,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>RiumNotch</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleShortVersionString</key><string>0.0.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
@@ -50,6 +56,8 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>NSSpeechRecognitionUsageDescription</key><string>말씀한 내용을 기기 내 음성 인식으로 텍스트로 변환합니다.</string>
 </dict></plist>
 PLIST
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$bundle/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_version" "$bundle/Contents/Info.plist"
 codesign --force --sign "$signing_identity" "$bundle/Contents/MacOS/rium-notch-core"
 codesign --force --sign "$signing_identity" "$bundle"
 codesign --verify --deep --strict "$bundle"

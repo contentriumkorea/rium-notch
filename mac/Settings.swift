@@ -93,6 +93,7 @@ struct SettingsView: View {
     @ObservedObject private var dictation: DictationController
     @ObservedObject private var navigation: SettingsNavigation
     private var page: SettingsPage { navigation.page }
+    private var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "알 수 없음" }
     @AppStorage("rium.light.enabled") private var lightEnabled = true
     @AppStorage("rium.light.agent") private var agentLight = true
     @AppStorage("rium.light.music") private var musicLight = true
@@ -160,7 +161,7 @@ struct SettingsView: View {
                     ForEach([SettingsPage.permissions, .privacy, .diagnostics]) { sidebarButton($0) }
                 }
             }
-            Text("Rium Notch 0.1.0").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 18)
+            Text("Rium Notch \(appVersion)").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 18)
         }
         .frame(width: 218, height: 780, alignment: .topLeading)
     }
@@ -189,7 +190,7 @@ struct SettingsView: View {
                     Image(systemName: "arrow.down.circle").font(.system(size: 20))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Rium Notch").fontWeight(.semibold)
-                        Text("0.1.0").font(.caption).foregroundStyle(.secondary)
+                        Text(appVersion).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("확인") { updater.check() }.disabled(updater.checking)
