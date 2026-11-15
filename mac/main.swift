@@ -385,6 +385,7 @@ final class Model: ObservableObject {
     @Published var lightCue: NotchLightCue?
     private var lightClearWork: DispatchWorkItem?
     private var hoverWork: DispatchWorkItem?
+    private var menuTrackingDepth = 0
     @Published var volume = "음량 조회 불가"
     @Published var volumeOverlay = ""
     @Published var overlaySymbol = "speaker.wave.2.fill"
@@ -615,12 +616,25 @@ final class Model: ObservableObject {
     func handleHover(_ inside: Bool) {
         guard hoverEnabled, !fileDragActive, !(homeEditing || tabEditing) || inside else { return }
         hoverWork?.cancel()
+        guard menuTrackingDepth == 0 else { return }
         guard inside != expanded else { return }
         if !inside && !autoHideEnabled { return }
         let delay = inside ? hoverReopenWait(lastCollapse: lastCollapse, now: Date()) : autoHideDelay
         if delay <= 0 { expanded = inside; return }
         let task = DispatchWorkItem { [weak self] in self?.expanded = inside }
         hoverWork = task; DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    func beginMenuTracking() {
+        guard expanded || menuTrackingDepth > 0 else { return }
+        menuTrackingDepth += 1
+        hoverWork?.cancel(); hoverWork = nil
+    }
+
+    func endMenuTracking(pointerInside: Bool) {
+        guard menuTrackingDepth > 0 else { return }
+        menuTrackingDepth -= 1
+        if menuTrackingDepth == 0 { handleHover(pointerInside) }
     }
 
     func setFileDragActive(_ active: Bool) {
@@ -2467,6 +2481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var ambientPanel: NSPanel!
     var status: NSStatusItem!
     var settingsWindow: NSWindow?
+    private var menuTrackingObservers: [NSObjectProtocol] = []
     private var screenObserver: NSObjectProtocol?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var globalMouseMonitor: Any?
@@ -2490,6 +2505,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = hosting
         position(height: notchHeight(expanded: false, section: .home)); panel.orderFrontRegardless()
         installMouseInterception()
+        let notifications = NotificationCenter.default
+        menuTrackingObservers.append(notifications.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.model.beginMenuTracking()
+        })
+        menuTrackingObservers.append(notifications.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.model.endMenuTracking(pointerInside: self.pointIsInsideNotch(NSEvent.mouseLocation))
+        })
         ambientPanel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         ambientPanel.isOpaque = false; ambientPanel.backgroundColor = .clear; ambientPanel.hasShadow = false
         ambientPanel.ignoresMouseEvents = true
@@ -2626,6 +2649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.flushClipboard()
         model.dictation.disable(persist: false)
         if let screenObserver = screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        for observer in menuTrackingObservers { NotificationCenter.default.removeObserver(observer) }
         pointerPollTimer?.invalidate()
         if let monitor = globalMouseMonitor { NSEvent.removeMonitor(monitor) }
         if let monitor = localMouseMonitor { NSEvent.removeMonitor(monitor) }
@@ -3547,6 +3571,19 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
     guard model.expanded else { fatalError("disabled auto-hide collapsed") }
     model.expanded = false; model.hoverEnabled = false; model.handleHover(true); RunLoop.current.run(until: Date().addingTimeInterval(0.4))
     guard !model.expanded else { fatalError("disabled hover expanded") }
+    model.hoverEnabled = true; model.autoHideEnabled = true; model.expanded = true
+    model.handleHover(false); model.beginMenuTracking(); model.beginMenuTracking()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    guard model.expanded else { fatalError("pending hover closed a tracking menu") }
+    model.handleHover(false); model.endMenuTracking(pointerInside: false)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    guard model.expanded else { fatalError("nested menu closed before root menu") }
+    model.endMenuTracking(pointerInside: false)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    guard !model.expanded else { fatalError("notch stayed open after menu tracking ended outside") }
+    model.expanded = true; model.beginMenuTracking(); model.handleHover(false); model.endMenuTracking(pointerInside: true)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    guard model.expanded else { fatalError("notch closed after menu ended inside") }
     print("hover self-test passed")
 } else if CommandLine.arguments.contains("--self-test-render-settings") {
     guard let output = ProcessInfo.processInfo.environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
