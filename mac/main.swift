@@ -1935,12 +1935,12 @@ struct HomeView: View {
                     HStack {
                         Button(action: { model.controlMedia("previous") }) { Image(systemName: "backward.fill").frame(width: 23, height: 23).overlay(Circle().stroke(.white.opacity(0.20), lineWidth: 1)) }.help("이전 곡")
                         Spacer()
-                        Button(action: { model.controlMedia("toggle") }) { Image(systemName: model.mediaPlaying ? "pause.fill" : "play.fill").foregroundStyle(.black).frame(width: 27, height: 27).background(.white, in: Circle()) }.help(model.mediaPlaying ? "일시 정지" : "재생")
+                        Button(action: { model.controlMedia("toggle") }) { Image(systemName: model.mediaPlaying ? "pause.fill" : "play.fill").foregroundStyle(.white).frame(width: 27, height: 27).overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1)) }.help(model.mediaPlaying ? "일시 정지" : "재생")
                         Spacer()
                         Button(action: { model.controlMedia("next") }) { Image(systemName: "forward.fill").frame(width: 23, height: 23).overlay(Circle().stroke(.white.opacity(0.20), lineWidth: 1)) }.help("다음 곡")
                     }.buttonStyle(.plain).disabled(!model.mediaAvailable || model.mediaControlPending)
                     }
-                }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(artwork: model.mediaAtmosphere, tint: .pink, radius: 24)
+                }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(artwork: model.mediaAtmosphere, tint: .pink, radius: 24, homeSurface: true)
                 .onTapGesture { if !model.homeEditing && model.homeVariant(.music) != "player" { model.select(.music) } }
                 .overlay { HomeSelectionOverlay(model: model, slot: .music) }
                 Button(action: { model.select(model.homeVariant(.centre) == "focus" ? .monitor : .agents) }) {
@@ -1974,7 +1974,7 @@ struct HomeView: View {
                             Text("최근 활동 없음").font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)
-                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: collapsedAgent(model.agentItems) == nil ? .clear : .blue, radius: 24)
+                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: collapsedAgent(model.agentItems) == nil ? .clear : .blue, radius: 24, homeSurface: true)
                 }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .centre) }
                 Button(action: { model.select(.weather) }) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -2015,7 +2015,7 @@ struct HomeView: View {
                             Text(model.weatherText).lineLimit(3)
                         }
                         Spacer(minLength: 0)
-                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: .cyan, radius: 24)
+                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: .cyan, radius: 24, homeSurface: true)
                 }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .weather) }
                 Button(action: { model.select(.agenda) }) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -2050,7 +2050,7 @@ struct HomeView: View {
                         else { Text(agenda.calendarStatus).lineLimit(3) }
                         }
                         Spacer(minLength: 0)
-                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(radius: 24)
+                    }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(radius: 24, homeSurface: true)
                 }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .calendar) }
             }.padding(.horizontal, -8)
             .background {
@@ -2330,7 +2330,7 @@ struct ShelfView: View {
 }
 
 extension View {
-    func riumGlassTile(artwork: NSImage? = nil, tint: Color = .clear, artworkOpacity: Double = 0.38, radius: CGFloat = 15) -> some View {
+    func riumGlassTile(artwork: NSImage? = nil, tint: Color = .clear, artworkOpacity: Double = 0.38, radius: CGFloat = 15, homeSurface: Bool = false) -> some View {
         padding(11)
             .background {
                 ZStack {
@@ -2344,10 +2344,26 @@ extension View {
                     } else {
                         LinearGradient(colors: [tint.opacity(0.20), .white.opacity(0.07), tint.opacity(0.10)], startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
-                    LinearGradient(colors: [.white.opacity(0.15), .clear, .black.opacity(0.12)], startPoint: .top, endPoint: .bottom)
+                    LinearGradient(colors: [.white.opacity(homeSurface ? 0.08 : 0.15), .clear, homeSurface ? .white.opacity(0.03) : .black.opacity(0.12)], startPoint: .top, endPoint: .bottom)
                 }.clipShape(RoundedRectangle(cornerRadius: radius))
+                    .riumNativeHomeGlass(homeSurface, tint: tint, radius: radius)
             }
-            .overlay(RoundedRectangle(cornerRadius: radius).stroke(LinearGradient(colors: [.white.opacity(0.36), .white.opacity(0.10), .white.opacity(0.23)], startPoint: .top, endPoint: .bottom), lineWidth: 0.8))
+            .overlay {
+                if homeSurface {
+                    RoundedRectangle(cornerRadius: radius).strokeBorder(.white.opacity(0.11), lineWidth: 2).blur(radius: 2.5)
+                        .clipShape(RoundedRectangle(cornerRadius: radius)).allowsHitTesting(false)
+                }
+            }
+            .overlay(RoundedRectangle(cornerRadius: radius).stroke(LinearGradient(colors: [.white.opacity(homeSurface ? 0.43 : 0.36), .white.opacity(0.10), .white.opacity(homeSurface ? 0.27 : 0.23)], startPoint: .top, endPoint: .bottom), lineWidth: 0.8))
+    }
+    @ViewBuilder func riumNativeHomeGlass(_ enabled: Bool, tint: Color, radius: CGFloat) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *), enabled {
+            self.glassEffect(.clear.tint(tint.opacity(0.12)), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        } else { self }
+        #else
+        self
+        #endif
     }
     func riumTile(_ tint: Color = .clear) -> some View {
         padding(11).background(RoundedRectangle(cornerRadius: 15).fill(LinearGradient(colors: [tint.opacity(0.20), Color.white.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing)))
@@ -2847,6 +2863,25 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
           let restored = views(content).compactMap({ $0 as? NSTextView }).first,
           restored.string == fixture, abs((restored.font?.pointSize ?? 0) - 42) < 0.01 else { fatalError("teleprompter restore failed") }
     nextWindow.close(); print("teleprompter restore, search and chapter self-test passed")
+} else if CommandLine.arguments.contains("--self-test-home-atmosphere") {
+    _ = NSApplication.shared
+    let model = Model(startServices: false)
+    model.expanded = true; model.cameraExclusion = 185; model.cameraHeight = 32
+    model.homeBackground = .blue
+    let view = NSHostingView(rootView: NotchContainer(model: model))
+    view.frame = NSRect(origin: .zero, size: model.currentNotchSize)
+    let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+    window.isOpaque = false; window.backgroundColor = .clear; window.contentView = view
+    view.layoutSubtreeIfNeeded()
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { fatalError("home atmosphere render unavailable") }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    let center = rep.pixelsWide / 2
+    for fraction in [0.03, 0.07, 0.12] {
+        guard let color = rep.colorAt(x: center, y: Int(Double(rep.pixelsHigh) * fraction))?.usingColorSpace(.deviceRGB),
+              max(color.redComponent, color.greenComponent, color.blueComponent) < 0.025 else { fatalError("home atmosphere entered camera area") }
+    }
+    guard let bottom = rep.colorAt(x: center, y: rep.pixelsHigh - 10)?.usingColorSpace(.deviceRGB), bottom.blueComponent > 0.015 else { fatalError("home atmosphere missing below cards") }
+    print("home atmosphere camera mask self-test passed")
 } else if CommandLine.arguments.contains("--self-test-home-layout") {
     let suite = "app.rium.notch.home-layout-test.\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suite) else { fatalError("layout test preferences unavailable") }
@@ -2898,6 +2933,11 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
     restored.start()
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     guard requests == 1, restored.status.hasPrefix("새 릴리스"), restored.releaseURL != nil else { fatalError("update cache or throttle failed") }
+    let upgraded = UpdateController(defaults: defaults, currentVersion: "1.2.3", fetch: { _, done in requests += 1; done(good, response, nil) })
+    upgraded.start()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    guard requests == 2, upgraded.status.hasPrefix("최신 릴리스"),
+          defaults.string(forKey: "rium.update.lastCheckedAppVersion") == "1.2.3" else { fatalError("upgraded app did not refresh release information") }
     defaults.removeObject(forKey: "rium.update.lastCheck")
     let malformed = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in done(Data("{}".utf8), response, nil) })
     malformed.check()

@@ -250,6 +250,10 @@ struct NotchContainer: View {
                     .animation(spring, value: outline)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
+                if model.expanded && model.section == .home {
+                    HomeAtmosphere(model: model, width: outline.width)
+                        .mask(AnimatedNotchBackdrop(width: outline.width, height: outline.height).fill(Color.white).animation(spring, value: outline))
+                }
                 NotchView(model: model)
                     .mask(AnimatedNotchBackdrop(width: outline.width, height: outline.height)
                         .fill(Color.white)

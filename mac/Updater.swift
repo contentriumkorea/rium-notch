@@ -39,7 +39,8 @@ final class UpdateController: ObservableObject {
         if value { checkIfDue() }
     }
     private func checkIfDue() {
-        if Self.isDue(last: defaults.double(forKey: "rium.update.lastCheck"), now: Date().timeIntervalSince1970) { check() }
+        if defaults.string(forKey: "rium.update.lastCheckedAppVersion") != currentVersion ||
+            Self.isDue(last: defaults.double(forKey: "rium.update.lastCheck"), now: Date().timeIntervalSince1970) { check() }
     }
     static func isDue(last: Double, now: Double) -> Bool {
         !last.isFinite || last <= 0 || last > now || now - last >= 86400
@@ -64,6 +65,7 @@ final class UpdateController: ObservableObject {
                     self.releaseURL = nil
                     self.defaults.removeObject(forKey: "rium.update.cachedRelease")
                     self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
+                    self.defaults.set(self.currentVersion, forKey: "rium.update.lastCheckedAppVersion")
                     return
                 }
                 guard http.statusCode == 200, let data = data, data.count <= 1_048_576 else {
@@ -81,6 +83,7 @@ final class UpdateController: ObservableObject {
                 self.status = result.0; self.releaseURL = url
                 self.defaults.set(cached, forKey: "rium.update.cachedRelease")
                 self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
+                self.defaults.set(self.currentVersion, forKey: "rium.update.lastCheckedAppVersion")
             }
         }
     }

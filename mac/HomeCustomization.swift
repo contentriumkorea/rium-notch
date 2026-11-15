@@ -63,7 +63,12 @@ struct EditableNotchTab: View {
                 if !model.tabEditing, tab.section == model.section { Text(tab.title).lineLimit(1) }
             }
             .padding(.horizontal, 9).frame(minWidth: 52, minHeight: 28)
-            .background(!model.tabEditing && tab.section != nil && tab.section == model.section ? Color.white.opacity(0.18) : Color.clear, in: Capsule())
+            .background {
+                if !model.tabEditing && tab.section != nil && tab.section == model.section {
+                    Capsule().fill(LinearGradient(colors: [.white.opacity(0.26), .white.opacity(0.13)], startPoint: .top, endPoint: .bottom))
+                        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 0.7))
+                }
+            }
             .overlay(Capsule().stroke(model.tabEditing && tab == model.selectedTab ? .white : .white.opacity(model.tabEditing ? 0.18 : 0), lineWidth: model.tabEditing && tab == model.selectedTab ? 1.5 : 1))
             .opacity(model.tabEditing && tab == .home ? 0.35 : 1)
         }.buttonStyle(.plain).help(tab.title).accessibilityLabel(tab.title)
