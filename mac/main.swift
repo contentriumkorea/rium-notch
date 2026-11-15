@@ -417,6 +417,14 @@ final class Model: ObservableObject {
     @Published var clipboardReady = true
     @Published var clipboardStorageStatus = ""
     @Published var section: PanelSection = .home
+    @Published var homeEditing = false
+    @Published var tabEditing = false
+    @Published var homeSelectedSlot: HomeSlot = .music
+    @Published var selectedTab: NotchTab = .agents
+    @Published var tabOrder: [NotchTab] = NotchTab.allCases
+    @Published var homeVariantValues: [String: String] = [:]
+    @Published var homeBackground: HomeBackground = .dynamic
+    var draggingTab: NotchTab?
     let updater = UpdateController()
     let dictation = DictationController()
     let teleprompter = TeleprompterController()
@@ -436,7 +444,7 @@ final class Model: ObservableObject {
                            agent: showsCollapsedAgent || !volumeOverlay.isEmpty, timer: timerState != 0, music: mediaPlaying)
     }
     var currentNotchSize: CGSize {
-        expanded ? CGSize(width: notchWidth(expanded: true, displayWidth: displayWidth), height: notchHeight(expanded: true, section: section)) : collapsedNotchSize
+        expanded ? CGSize(width: notchWidth(expanded: true, displayWidth: displayWidth), height: homeEditing ? 455 : (tabEditing ? 250 : notchHeight(expanded: true, section: section))) : collapsedNotchSize
     }
     var currentNotchOutlineSize: CGSize {
         notchOutlineSize(content: currentNotchSize, expanded: expanded, screenWidth: displayWidth)
@@ -523,14 +531,17 @@ final class Model: ObservableObject {
     private var clipboardCanSave = false
     private let pasteboard: NSPasteboard
     private let timerPreferences: UserDefaults?
+    private let layoutPreferences: UserDefaults?
     private var busy = Set<String>()
 
-    init(pasteboard: NSPasteboard = .general, startServices: Bool = true, timerPreferences: UserDefaults? = nil, mediaRequester: MediaRequester? = nil) {
+    init(pasteboard: NSPasteboard = .general, startServices: Bool = true, timerPreferences: UserDefaults? = nil, mediaRequester: MediaRequester? = nil, layoutPreferences: UserDefaults? = nil) {
         self.pasteboard = pasteboard
         self.timerPreferences = timerPreferences ?? (startServices ? .standard : nil)
         self.mediaRequester = mediaRequester
+        self.layoutPreferences = layoutPreferences ?? (startServices ? .standard : nil)
         self.agenda = AgendaModel(autoRefresh: startServices)
         restorePomodoroSettings()
+        restoreHomeLayout()
         guard startServices else { return }
         updater.start()
         restoreClipboard()
@@ -602,7 +613,7 @@ final class Model: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + cue.duration, execute: task)
     }
     func handleHover(_ inside: Bool) {
-        guard hoverEnabled, !fileDragActive else { return }
+        guard hoverEnabled, !fileDragActive, !(homeEditing || tabEditing) || inside else { return }
         hoverWork?.cancel()
         guard inside != expanded else { return }
         if !inside && !autoHideEnabled { return }
@@ -656,7 +667,45 @@ final class Model: ObservableObject {
         } catch { launchAtLogin = SMAppService.mainApp.status == .enabled; settingsMessage = "로그인 항목을 변경할 수 없습니다" }
     }
 
+    func restoreHomeLayout() {
+        tabOrder = NotchTab.normalized(layoutPreferences?.stringArray(forKey: "rium.home.tabOrder"))
+        for slot in HomeSlot.allCases {
+            let value = layoutPreferences?.string(forKey: "rium.home.variant.\(slot.rawValue)") ?? slot.defaultVariant
+            homeVariantValues[slot.rawValue] = slot.variants.contains(where: { $0.id == value }) ? value : slot.defaultVariant
+        }
+        homeBackground = layoutPreferences?.string(forKey: "rium.home.background").flatMap(HomeBackground.init(rawValue:)) ?? .dynamic
+    }
+    func homeVariant(_ slot: HomeSlot) -> String { homeVariantValues[slot.rawValue] ?? slot.defaultVariant }
+    func setHomeVariant(_ value: String, for slot: HomeSlot) {
+        guard slot.variants.contains(where: { $0.id == value }) else { return }
+        homeVariantValues[slot.rawValue] = value
+        layoutPreferences?.set(value, forKey: "rium.home.variant.\(slot.rawValue)")
+    }
+    func setHomeBackground(_ value: HomeBackground) {
+        homeBackground = value; layoutPreferences?.set(value.rawValue, forKey: "rium.home.background")
+    }
+    func beginHomeEdit() {
+        hoverWork?.cancel(); tabEditing = false; section = .home; expanded = true; homeEditing = true
+    }
+    func beginTabEdit() {
+        hoverWork?.cancel(); homeEditing = false; section = .home; expanded = true; tabEditing = true
+        if selectedTab == .home || !tabOrder.contains(selectedTab) { selectedTab = tabOrder.first(where: { $0 != .home }) ?? .agents }
+    }
+    func finishEditing() { homeEditing = false; tabEditing = false; draggingTab = nil }
+    func moveTab(_ tab: NotchTab, by delta: Int) {
+        guard tab != .home, let from = tabOrder.firstIndex(of: tab) else { return }
+        let to = from + delta
+        guard to >= 1, to < tabOrder.count else { return }
+        tabOrder.swapAt(from, to); layoutPreferences?.set(tabOrder.map(\.rawValue), forKey: "rium.home.tabOrder")
+    }
+    func moveTab(_ tab: NotchTab, to target: NotchTab) {
+        guard tab != .home, target != .home, let from = tabOrder.firstIndex(of: tab), let to = tabOrder.firstIndex(of: target), from != to else { return }
+        tabOrder.remove(at: from); tabOrder.insert(tab, at: to)
+        selectedTab = tab; layoutPreferences?.set(tabOrder.map(\.rawValue), forKey: "rium.home.tabOrder")
+    }
+
     func select(_ next: PanelSection) {
+        if next != .home && (homeEditing || tabEditing) { finishEditing() }
         section = next
         if next == .agenda || next == .home { agenda.refreshAuthorized() }
         if next == .shelf { reloadShelf() }
@@ -1644,20 +1693,28 @@ struct NotchView: View {
                 }
             }
             if model.expanded {
+                if model.tabEditing {
+                    HStack(spacing: 7) {
+                        Button { model.moveTab(model.selectedTab, by: -1) } label: { Image(systemName: "chevron.left").frame(width: 25, height: 25).background(.white.opacity(0.10), in: Circle()) }
+                            .disabled(model.tabOrder.firstIndex(of: model.selectedTab).map { $0 <= 1 } ?? true).accessibilityLabel("선택한 탭을 왼쪽으로 이동")
+                        Button { model.moveTab(model.selectedTab, by: 1) } label: { Image(systemName: "chevron.right").frame(width: 25, height: 25).background(.white.opacity(0.10), in: Circle()) }
+                            .disabled(model.tabOrder.firstIndex(of: model.selectedTab).map { $0 >= model.tabOrder.count - 1 } ?? true).accessibilityLabel("선택한 탭을 오른쪽으로 이동")
+                        Text(model.selectedTab.title).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(model.tabOrder.count)/\(NotchTab.allCases.count)").foregroundStyle(.secondary)
+                        Button("완료") { model.finishEditing() }.buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 5).background(.white, in: Capsule()).foregroundStyle(.black)
+                    }.font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
+                }
                 HStack(spacing: 12) {
                     HStack(spacing: 8) {
-                        TabButton(model: model, section: .home, icon: "square.grid.2x2", title: "홈")
-                        TabButton(model: model, section: .agents, icon: "bubble.left.and.bubble.right", title: "작업")
-                        TabButton(model: model, section: .dictation, icon: "waveform", title: "받아쓰기")
-                        TabButton(model: model, section: .clipboard, icon: "clipboard", title: "클립보드")
-                        Button(action: { model.teleprompter.show() }) { Image(systemName: "text.alignleft").frame(width: 52, height: 28) }.help("프롬프터").accessibilityLabel("프롬프터")
+                        ForEach(model.tabOrder) { tab in EditableNotchTab(model: model, tab: tab) }
                     }
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(.white.opacity(0.10), in: Capsule())
                     Spacer()
                     Menu {
-                        Button("홈 편집 (준비 중)") {}.disabled(true)
-                        Button("탭 편집 (준비 중)") {}.disabled(true)
+                        Button("홈 편집") { model.beginHomeEdit() }
+                        Button("탭 편집") { model.beginTabEdit() }
                         Menu("다른 기능") {
                             Button("음악") { model.select(.music) }
                             Button("날씨") { model.select(.weather) }
@@ -1674,7 +1731,11 @@ struct NotchView: View {
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).help("더 보기").accessibilityLabel("더 보기")
                 }.buttonStyle(.plain).font(.system(size: 12, weight: .medium)).padding(.trailing, -14)
                 if model.section == .home {
-                    HomeView(model: model, agenda: model.agenda)
+                    if model.homeEditing {
+                        HStack { Text("홈 편집").font(.system(size: 14, weight: .semibold)); Spacer(); Button("완료") { model.finishEditing() }.buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 5).background(.white, in: Capsule()).foregroundStyle(.black) }
+                        HomeView(model: model, agenda: model.agenda).frame(height: 115, alignment: .top)
+                        HomeEditorOptions(model: model)
+                    } else { HomeView(model: model, agenda: model.agenda) }
                 } else if model.section == .dictation {
                     DictationView(model: model.dictation)
                 } else if model.section == .agents {
@@ -1774,6 +1835,8 @@ struct NotchView: View {
         .onTapGesture { if !model.expanded { model.expanded = true } }
         .onChange(of: model.expanded) { _, value in NotificationCenter.default.post(name: .notchSizeChanged, object: notchHeight(expanded: value, section: model.section)) }
         .onChange(of: model.section) { _, section in if model.expanded { NotificationCenter.default.post(name: .notchSizeChanged, object: notchHeight(expanded: true, section: section)) } }
+        .onChange(of: model.homeEditing) { _, _ in NotificationCenter.default.post(name: .notchSizeChanged, object: model.currentNotchSize.height) }
+        .onChange(of: model.tabEditing) { _, _ in NotificationCenter.default.post(name: .notchSizeChanged, object: model.currentNotchSize.height) }
     }
 }
 
@@ -1818,30 +1881,6 @@ struct PowerSummary: View {
     var body: some View { Text(model.summary).foregroundStyle(model.percentage.map { $0 <= 10 ? Color.red : ($0 <= 20 ? Color.orange : Color.white) } ?? Color.secondary) }
 }
 
-struct TabButton: View {
-    @ObservedObject var model: Model
-    let section: PanelSection
-    let icon: String
-    let title: String
-    var body: some View {
-        Button(action: { model.select(section) }) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).frame(width: 16)
-                if section == .agents {
-                    let count = model.agentItems.filter { ["작업 중", "활동 감지", "도구 실행 감지"].contains($0.state) || $0.state.hasPrefix("승인 대기") }.count
-                    if count > 0 { Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.black).padding(.horizontal, 6).padding(.vertical, 2).background(Color.blue, in: Capsule()) }
-                }
-                if section == .clipboard && !model.clipboardItems.isEmpty {
-                    Text("\(model.clipboardItems.count)").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                }
-                if model.section == section { Text(title).lineLimit(1) }
-            }
-            .padding(.horizontal, 9).frame(minWidth: 52, minHeight: 28)
-            .background(model.section == section ? Color.white.opacity(0.18) : Color.clear, in: Capsule())
-        }.buttonStyle(.plain).help(title).accessibilityLabel(title)
-    }
-}
-
 func mainWeatherPreview(_ model: Model) -> [WeatherHour] {
     Array(model.weatherForecast.filter { $0.date > model.now }.prefix(3))
 }
@@ -1860,6 +1899,23 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 7) {
                 VStack(alignment: .leading, spacing: 6) {
+                    if model.homeVariant(.music) == "artwork" {
+                        HStack(spacing: 10) {
+                            Group {
+                                if let artwork = model.mediaArtwork { Image(nsImage: artwork).resizable().scaledToFill() }
+                                else { Image(systemName: "music.note").resizable().scaledToFit().padding(15).foregroundStyle(.white.opacity(0.65)).background(.white.opacity(0.08)) }
+                            }.frame(width: 68, height: 68).clipShape(RoundedRectangle(cornerRadius: 12))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(model.mediaTitle).fontWeight(.semibold).lineLimit(2)
+                                Text(model.mediaArtist.isEmpty ? "음악" : model.mediaArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    } else if model.homeVariant(.music) == "lyrics" {
+                        Text(model.mediaTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(model.lyricLines.last(where: { ($0.time ?? .infinity) <= model.mediaElapsed })?.text ?? model.lyricLines.first?.text ?? (model.lyricsEnabled ? model.lyricsStatus : "가사를 켜면 여기에 표시됩니다."))
+                            .font(.system(size: 13, weight: .medium)).lineLimit(3)
+                    } else {
                     HStack(spacing: 8) {
                         Group {
                             if let artwork = model.mediaArtwork { Image(nsImage: artwork).resizable().scaledToFill() }
@@ -1883,10 +1939,23 @@ struct HomeView: View {
                         Spacer()
                         Button(action: { model.controlMedia("next") }) { Image(systemName: "forward.fill").frame(width: 23, height: 23).overlay(Circle().stroke(.white.opacity(0.20), lineWidth: 1)) }.help("다음 곡")
                     }.buttonStyle(.plain).disabled(!model.mediaAvailable || model.mediaControlPending)
+                    }
                 }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(artwork: model.mediaAtmosphere, tint: .pink, radius: 24)
-                Button(action: { model.select(.agents) }) {
+                .onTapGesture { if !model.homeEditing && model.homeVariant(.music) != "player" { model.select(.music) } }
+                .overlay { HomeSelectionOverlay(model: model, slot: .music) }
+                Button(action: { model.select(model.homeVariant(.centre) == "focus" ? .monitor : .agents) }) {
                     VStack(alignment: .leading, spacing: 2) {
-                        if let agent = collapsedAgent(model.agentItems) {
+                        if model.homeVariant(.centre) == "today" {
+                            Text(model.now, style: .date).font(.caption).foregroundStyle(.secondary)
+                            Text(model.agentStatus).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text(model.now, format: .dateTime.day()).font(.system(size: 38, weight: .light))
+                        } else if model.homeVariant(.centre) == "focus" {
+                            Text("집중 타이머").font(.caption).foregroundStyle(.secondary)
+                            Text(model.timerState == 0 ? "준비됨" : "진행 중").font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            Text(model.timerState == 0 ? String(format: "%02d:00", model.pomodoroFocus) : String(format: "%02llu:%02llu", model.timerRemaining / 60, model.timerRemaining % 60)).font(.system(size: 34, weight: .light)).monospacedDigit()
+                        } else if let agent = collapsedAgent(model.agentItems) {
                             HStack {
                                 Text(agent.providerName).font(.caption).foregroundStyle(.secondary)
                                 Spacer()
@@ -1906,11 +1975,30 @@ struct HomeView: View {
                         }
                         Spacer(minLength: 0)
                     }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: collapsedAgent(model.agentItems) == nil ? .clear : .blue, radius: 24)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .centre) }
                 Button(action: { model.select(.weather) }) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(model.weatherCity.isEmpty ? "날씨" : model.weatherCity).font(.caption).foregroundStyle(.secondary)
-                        if let temperature = model.weatherTemperature {
+                        if model.homeVariant(.weather) == "sentence", let temperature = model.weatherTemperature {
+                            Spacer(minLength: 0)
+                            Text("현재 \(String(format: "%.0f°", temperature)), \(model.weatherCondition)").font(.system(size: 15, weight: .medium)).lineLimit(3)
+                        } else if model.homeVariant(.weather) == "forecast" {
+                            Text(model.weatherCondition).font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            if mainWeatherPreview(model).isEmpty {
+                                Text("시간별 예보 없음").font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                HStack {
+                                    ForEach(mainWeatherPreview(model)) { hour in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(homeWeatherHour(hour.date, timeZoneID: model.weatherTimeZoneID) + "시").font(.caption2)
+                                            Image(systemName: weatherIcon(hour.symbol)).font(.system(size: 13))
+                                            Text(String(format: "%.0f°", hour.temperature)).font(.caption)
+                                        }.frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                            }
+                        } else if let temperature = model.weatherTemperature {
                             Text(model.weatherCondition).font(.caption).foregroundStyle(.secondary)
                             Spacer(minLength: 0)
                             HStack(alignment: .bottom, spacing: 3) {
@@ -1928,9 +2016,19 @@ struct HomeView: View {
                         }
                         Spacer(minLength: 0)
                     }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(tint: .cyan, radius: 24)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .weather) }
                 Button(action: { model.select(.agenda) }) {
                     VStack(alignment: .leading, spacing: 6) {
+                        if model.homeVariant(.calendar) == "date" {
+                            Text(model.now, format: .dateTime.weekday(.wide)).font(.caption).foregroundStyle(.secondary)
+                            Text(model.now, format: .dateTime.month(.wide)).font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            Text(model.now, format: .dateTime.day()).font(.system(size: 38, weight: .light))
+                        } else if model.homeVariant(.calendar) == "clock" {
+                            Text(model.now, style: .date).font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            Text(model.now, style: .time).font(.system(size: 31, weight: .light)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6)
+                        } else {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("다음 일정").font(.caption).foregroundStyle(.secondary)
@@ -1950,16 +2048,21 @@ struct HomeView: View {
                             }
                         }
                         else { Text(agenda.calendarStatus).lineLimit(3) }
+                        }
                         Spacer(minLength: 0)
                     }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(radius: 24)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).overlay { HomeSelectionOverlay(model: model, slot: .calendar) }
             }.padding(.horizontal, -8)
             .background {
-                if let artwork = model.mediaAtmosphere {
+                if model.homeBackground == .blue {
+                    model.homeBackground.preview.opacity(0.7).blur(radius: 12)
+                } else if model.homeBackground == .graphite {
+                    model.homeBackground.preview.opacity(0.6).blur(radius: 12)
+                } else if let artwork = model.mediaAtmosphere {
                     GeometryReader { geometry in
                         Image(nsImage: artwork).resizable().scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height)
-                            .opacity(0.20)
+                            .opacity(model.homeBackground == .album ? 0.45 : 0.20)
                             .mask(LinearGradient(stops: [
                                 .init(color: .clear, location: 0),
                                 .init(color: .white, location: 0.08),
@@ -2744,6 +2847,30 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
           let restored = views(content).compactMap({ $0 as? NSTextView }).first,
           restored.string == fixture, abs((restored.font?.pointSize ?? 0) - 42) < 0.01 else { fatalError("teleprompter restore failed") }
     nextWindow.close(); print("teleprompter restore, search and chapter self-test passed")
+} else if CommandLine.arguments.contains("--self-test-home-layout") {
+    let suite = "app.rium.notch.home-layout-test.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { fatalError("layout test preferences unavailable") }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["clipboard", "home", "clipboard", "unknown", "agents"], forKey: "rium.home.tabOrder")
+    defaults.set("invalid", forKey: "rium.home.variant.weather")
+    let model = Model(startServices: false, layoutPreferences: defaults)
+    guard model.tabOrder == [.home, .clipboard, .agents, .dictation, .teleprompter], model.homeVariant(.weather) == "now" else { fatalError("layout migration and validation failed") }
+    model.moveTab(.clipboard, by: -1)
+    guard model.tabOrder.first == .home, model.tabOrder[1] == .clipboard else { fatalError("home must stay fixed") }
+    model.moveTab(.agents, by: -1)
+    model.moveTab(.teleprompter, to: .clipboard)
+    model.setHomeVariant("forecast", for: .weather); model.setHomeVariant("clock", for: .calendar)
+    model.setHomeVariant("invalid", for: .music); model.setHomeBackground(.blue)
+    model.beginHomeEdit()
+    guard model.expanded, model.currentNotchSize.height == 455 else { fatalError("home editor geometry failed") }
+    model.beginTabEdit()
+    guard !model.homeEditing, model.tabEditing, model.currentNotchSize.height == 250 else { fatalError("tab editor transition failed") }
+    model.finishEditing()
+    model.beginHomeEdit(); model.select(.weather)
+    guard !model.homeEditing, !model.tabEditing, model.section == .weather else { fatalError("leaving home editor failed") }
+    let restored = Model(startServices: false, layoutPreferences: defaults)
+    guard restored.tabOrder == model.tabOrder, restored.homeVariant(.weather) == "forecast", restored.homeVariant(.calendar) == "clock", restored.homeVariant(.music) == "player", restored.homeBackground == .blue else { fatalError("layout persistence failed") }
+    print("home variants, background, tab ordering and editor geometry self-test passed")
 } else if CommandLine.arguments.contains("--self-test-updater") {
     func release(_ tag: String, _ url: String, prerelease: Bool = false) -> Data {
         try! JSONSerialization.data(withJSONObject: ["tag_name": tag, "html_url": url, "draft": false, "prerelease": prerelease])
@@ -3437,11 +3564,22 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
     view.cacheDisplay(in: view.bounds, to: rep)
     guard let data = rep.representation(using: .png, properties: [:]) else { fatalError("timer render failed") }
     try data.write(to: URL(fileURLWithPath: output), options: .atomic); print("timer render self-test passed")
-} else if CommandLine.arguments.contains("--self-test-render") || CommandLine.arguments.contains("--self-test-render-artwork-home") || CommandLine.arguments.contains("--self-test-render-music-view") || CommandLine.arguments.contains("--self-test-render-music-empty") || CommandLine.arguments.contains("--self-test-render-lyrics-view") || CommandLine.arguments.contains("--self-test-render-monitor") || CommandLine.arguments.contains("--self-test-render-weather") || CommandLine.arguments.contains("--self-test-render-agenda") || CommandLine.arguments.contains("--self-test-render-clipboard") || CommandLine.arguments.contains("--self-test-render-agent-view") {
+} else if CommandLine.arguments.contains("--self-test-render") || CommandLine.arguments.contains("--self-test-render-home-editor") || CommandLine.arguments.contains("--self-test-render-tab-editor") || CommandLine.arguments.contains("--self-test-render-artwork-home") || CommandLine.arguments.contains("--self-test-render-music-view") || CommandLine.arguments.contains("--self-test-render-music-empty") || CommandLine.arguments.contains("--self-test-render-lyrics-view") || CommandLine.arguments.contains("--self-test-render-monitor") || CommandLine.arguments.contains("--self-test-render-weather") || CommandLine.arguments.contains("--self-test-render-agenda") || CommandLine.arguments.contains("--self-test-render-clipboard") || CommandLine.arguments.contains("--self-test-render-agent-view") {
     guard let output = ProcessInfo.processInfo.environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
     _ = NSApplication.shared
     let model = Model(startServices: false); model.expanded = true; model.cpu = "24%"; model.pressure = "정상"
+    if CommandLine.arguments.contains("--self-test-render-home-editor") {
+        model.beginHomeEdit()
+        if let name = ProcessInfo.processInfo.environment["RIUM_HOME_TEST_SLOT"], let slot = HomeSlot(rawValue: name) {
+            model.homeSelectedSlot = slot
+            if let variant = ProcessInfo.processInfo.environment["RIUM_HOME_TEST_VARIANT"] { model.setHomeVariant(variant, for: slot) }
+        }
+    }
+    if CommandLine.arguments.contains("--self-test-render-tab-editor") { model.beginTabEdit() }
     model.mediaAvailable = true; model.mediaTitle = "테스트 음악"; model.mediaArtist = "Rium"; model.weatherText = "서울  18°  맑음"; model.weatherCity = "서울"; model.weatherCondition = "맑음"; model.weatherTemperature = 18
+    if CommandLine.arguments.contains("--self-test-render-home-editor") {
+        model.weatherForecast = (1...3).map { i in WeatherHour(id: "home-\(i)", date: model.now.addingTimeInterval(Double(i) * 3600), temperature: 18 - Double(i), symbol: "cloudy", precipitation: nil) }
+    }
     if CommandLine.arguments.contains("--self-test-render-agent-view") {
         model.section = .agents
         model.agentItems = [AgentActivity(id: "01234567-89ab-cdef-0123-456789abcdef", project: "Rium Notch", state: "활동 감지", activity: "도구 사용", recentActivities: ["작업 실행", "파일 수정", "도구 사용"], ageSeconds: 8)]
