@@ -1885,6 +1885,14 @@ func mainWeatherPreview(_ model: Model) -> [WeatherHour] {
     Array(model.weatherForecast.filter { $0.date > model.now }.prefix(3))
 }
 
+func homeCentreDestination(_ variant: String) -> PanelSection {
+    switch variant {
+    case "today": return .agenda
+    case "focus": return .monitor
+    default: return .agents
+    }
+}
+
 func homeWeatherHour(_ date: Date, timeZoneID: String?) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "H"
@@ -1943,7 +1951,7 @@ struct HomeView: View {
                 }.frame(maxWidth: .infinity, minHeight: 94, maxHeight: 94, alignment: .topLeading).riumGlassTile(artwork: model.mediaAtmosphere, tint: .pink, radius: 24, homeSurface: true)
                 .onTapGesture { if !model.homeEditing && model.homeVariant(.music) != "player" { model.select(.music) } }
                 .overlay { HomeSelectionOverlay(model: model, slot: .music) }
-                Button(action: { model.select(model.homeVariant(.centre) == "focus" ? .monitor : .agents) }) {
+                Button(action: { model.select(homeCentreDestination(model.homeVariant(.centre))) }) {
                     VStack(alignment: .leading, spacing: 2) {
                         if model.homeVariant(.centre) == "today" {
                             Text(model.now, style: .date).font(.caption).foregroundStyle(.secondary)
@@ -2883,6 +2891,8 @@ if CommandLine.arguments.contains("--self-test-timer-notifications") {
     guard let bottom = rep.colorAt(x: center, y: rep.pixelsHigh - 10)?.usingColorSpace(.deviceRGB), bottom.blueComponent > 0.015 else { fatalError("home atmosphere missing below cards") }
     print("home atmosphere camera mask self-test passed")
 } else if CommandLine.arguments.contains("--self-test-home-layout") {
+    guard homeCentreDestination("today") == .agenda, homeCentreDestination("focus") == .monitor,
+          homeCentreDestination("agent") == .agents else { fatalError("home centre destination failed") }
     let suite = "app.rium.notch.home-layout-test.\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suite) else { fatalError("layout test preferences unavailable") }
     defer { defaults.removePersistentDomain(forName: suite) }

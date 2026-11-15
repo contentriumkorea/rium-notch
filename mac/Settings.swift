@@ -375,12 +375,7 @@ struct SettingsView: View {
     }
     private func cardStylePreview(_ title: String, selected: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(LinearGradient(colors: [Color.blue.opacity(0.30), .black], startPoint: .topLeading, endPoint: .bottomTrailing))
-                HStack(spacing: 4) {
-                    ForEach(0..<3) { _ in RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.13)) }
-                }.padding(12)
-            }.frame(height: 70)
+            CardStyleIllustration(style: title).frame(height: 70)
             HStack { Text(title).font(.caption.weight(.semibold)); Spacer(); if !selected { Text("준비 중").font(.caption2).foregroundStyle(.secondary) } }
         }.padding(6).frame(maxWidth: .infinity)
             .background(Color(red: 0.125, green: 0.14, blue: 0.17), in: RoundedRectangle(cornerRadius: 16))
@@ -429,5 +424,80 @@ struct SettingsView: View {
     }
     private func openPrivacy(_ anchor: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") { NSWorkspace.shared.open(url) }
+    }
+}
+
+// Drawn locally for the settings screen; the original app's preview assets
+// are not bundled. The illustrations describe styles, not selectable modes.
+private struct CardStyleIllustration: View {
+    let style: String
+    private var dashboard: Bool { style == "대시보드" }
+    private var physical: Bool { style == "피지컬" }
+    private var glass: Bool { style == "리퀴드 글래스" }
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(Color.black)
+                if glass {
+                    RadialGradient(colors: [Color.pink.opacity(0.35), .clear], center: UnitPoint(x: 0.25, y: 0.8), startRadius: 0, endRadius: geometry.size.width * 0.45)
+                    RadialGradient(colors: [Color.orange.opacity(0.22), .clear], center: UnitPoint(x: 0.75, y: 0.85), startRadius: 0, endRadius: geometry.size.width * 0.38)
+                }
+                if dashboard {
+                    HStack(spacing: 3) {
+                        dashboardCard { HStack(spacing: 4) { artwork.frame(width: 23, height: 23); miniLines } }
+                        dashboardCard { Image(systemName: "gauge.medium").font(.system(size: 14)); Text("19°").font(.system(size: 9, weight: .bold)) }
+                        dashboardCard { RoundedRectangle(cornerRadius: 1).fill(Color.yellow.opacity(0.8)).frame(width: 16, height: 22).rotationEffect(.degrees(-4)) }
+                    }.padding(5)
+                } else {
+                    HStack(spacing: 3) {
+                        miniPanel {
+                            HStack(spacing: 5) {
+                                artwork.frame(width: 24, height: 24)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    miniLines
+                                    Capsule().fill(.pink.opacity(0.7)).frame(width: 22, height: 2)
+                                    HStack(spacing: 5) { Image(systemName: "backward.fill"); Image(systemName: "play.fill"); Image(systemName: "forward.fill") }.font(.system(size: 5))
+                                }
+                            }
+                        }
+                        miniPanel {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("가사").font(.system(size: 6, weight: .medium)).foregroundStyle(.secondary)
+                                Spacer(minLength: 0)
+                                HStack(spacing: 2) { ForEach(0..<5) { _ in Capsule().fill(.pink.opacity(0.7)).frame(width: 2, height: 7) } }
+                                Spacer(minLength: 0)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }.padding(5)
+                    if physical {
+                        Canvas { context, size in
+                            var grid = Path()
+                            stride(from: CGFloat(0), through: size.width, by: 3).forEach { x in grid.move(to: CGPoint(x: x, y: 0)); grid.addLine(to: CGPoint(x: x, y: size.height)) }
+                            stride(from: CGFloat(0), through: size.height, by: 3).forEach { y in grid.move(to: CGPoint(x: 0, y: y)); grid.addLine(to: CGPoint(x: size.width, y: y)) }
+                            context.stroke(grid, with: .color(.black.opacity(0.42)), lineWidth: 0.5)
+                        }.allowsHitTesting(false)
+                    }
+                }
+            }.clipShape(RoundedRectangle(cornerRadius: 12))
+        }.accessibilityHidden(true)
+    }
+    private var artwork: some View {
+        RoundedRectangle(cornerRadius: 4).fill(LinearGradient(colors: [.pink, .purple, .yellow.opacity(0.9), .mint], startPoint: .topLeading, endPoint: .bottomTrailing))
+    }
+    private var miniLines: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Capsule().fill(.white.opacity(0.8)).frame(width: 24, height: 3)
+            Capsule().fill(.white.opacity(0.35)).frame(width: 18, height: 2)
+        }
+    }
+    private func miniPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content().padding(5).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(.white.opacity(glass ? 0.06 : 0.035), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(glass ? 0.18 : 0.08), lineWidth: 0.6))
+    }
+    private func dashboardCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content().frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(LinearGradient(colors: [.white.opacity(0.27), .white.opacity(0.13)], startPoint: .top, endPoint: .bottom), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.15), lineWidth: 0.5))
     }
 }
