@@ -1662,8 +1662,11 @@ final class Model: ObservableObject {
         let status = showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || !volumeOverlay.isEmpty
         // shortcut: the original branches are known, but their status mapping needs comparison.
         let compactMode: Int32 = visibleFocusAlarmPeek != nil ? 6 : detail ? 2 : status ? 1 : timerState != 0 && mediaLightPlaying ? 5 : timerState != 0 ? 3 : mediaLightPlaying ? 4 : 0
-        let size = expanded ? currentNotchOutlineSize : (floatingIslandCompactSize(screenWidth: placement.bounds.screen.width,
+        var size = expanded ? currentNotchOutlineSize : (floatingIslandCompactSize(screenWidth: placement.bounds.screen.width,
             menuHeight: placement.bounds.menuHeight, mode: compactMode) ?? CGSize(width: 96, height: 24))
+        if !expanded, let side = compactExternalAgentSideWidth {
+            size.width = min(size.width, 2 * (side + 8))
+        }
         return FloatingIslandScreenGeometry(bounds: placement.bounds, anchor: placement.anchor, size: size,
             expanded: expanded, camera: placement.camera, radius: expanded ? 28 : detail ? 16 : 12,
             adjustsCard: !expanded && compactMode != 0)
@@ -2071,11 +2074,38 @@ final class Model: ObservableObject {
     func liveAgent(for peek: AgentTransientPeek) -> AgentActivity {
         agentItems.first { sameAgentSession($0, peek.agent) } ?? peek.agent
     }
+    var collapsedExternalAgent: AgentActivity? {
+        if assistantListening || assistantSpeaking { return nil }
+        if let peek = visibleAgentTransientPeek { return liveAgent(for: peek) }
+        guard let agent = collapsedAgent(externalAgentItems),
+              externalAgentPrecedesPersonal(agent.state, assistant: assistantIndicator,
+                                            finishing: assistantFinishing, outcome: assistant.lastOutcome) else { return nil }
+        return agent
+    }
+    private var compactExternalAgentSideWidth: CGFloat? {
+        if let peek = visibleAgentTransientPeek, visibleFocusAlarmPeek == nil {
+            switch peek.kind {
+            case .running: return usageTrackingEnabled ? notchStatusCharacterSize : CollapsedAgentPulse.badgeWidth
+            case .completed: return CollapsedAgentPulse.badgeWidth
+            case .failed, .interrupted, .stalled: return agentPeekLabelWidth
+            }
+        }
+        guard notchScreenAvailable, !hasVisibleDetailPeek, !shelfRevealVisible, !dictationDisplayActive, !visibleSystemOverlay,
+              !receivingFile, receivedFilePeek == nil, shortcutPeek == nil, caseKeyPeek == nil,
+              batteryPeek == nil, visibleTimerAlarmTitle == nil, let agent = collapsedExternalAgent,
+              agentIsRunning(agent.state) || agentNeedsAttention(agent.state) else { return nil }
+        return usageTrackingEnabled && agentIsRunning(agent.state) ? notchStatusCharacterSize : CollapsedAgentPulse.badgeWidth
+    }
     var collapsedNotchSize: CGSize {
         var size = calculateCollapsedNotchSize(cameraWidth: cameraExclusion, cameraHeight: cameraHeight, screenWidth: displayWidth,
                            agent: showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || visibleClipboardPeek != nil || visibleAirDropPeek || visibleTrackSkipPeek != nil || visibleSystemNotificationPeek != nil || !volumeOverlay.isEmpty, timer: timerState != 0, music: mediaLightPlaying,
                            notification: visibleSystemNotificationPeek != nil, focusAlarm: visibleFocusAlarmPeek != nil, shelf: shelfRevealVisible,
                            shelfMinimumWidth: shelfConfirmationKind == .screenshot ? 0 : shelfDragWidth)
+        if let side = compactExternalAgentSideWidth {
+            // Match the camera gap in the preview and the steady compact header.
+            let gap = cameraExclusion > 0 ? cameraExclusion + 8 : 0
+            size.width = min(size.width, max(cameraExclusion > 0 ? cameraExclusion : 185, gap + 2 * (26 + side)))
+        }
         if showsCompactMonitor && cameraExclusion > 0 {
             let monitorWidth = cameraExclusion + 8 + 2 * (CompactMonitorBadge.sideInset + CompactMonitorBadge.size)
             size.width = max(size.width, min(monitorWidth, displayWidth - 24))
@@ -6061,6 +6091,7 @@ private struct AgentFaceIdentity: Equatable {
 }
 
 private let notchStatusCharacterSize: CGFloat = 30
+private let agentPeekLabelWidth: CGFloat = 72
 
 struct CollapsedAgentFace: View {
     let waiting: Bool
@@ -6304,6 +6335,7 @@ struct CollapsedAgentFace: View {
 }
 
 struct CollapsedAgentPulse: View {
+    static let badgeWidth: CGFloat = 60
     let active: Bool
     let waiting: Bool
     let completed: Bool
@@ -6535,7 +6567,7 @@ struct CollapsedAgentPulse: View {
                 }
             }
         }
-        .frame(width: 60, height: 22)
+        .frame(width: Self.badgeWidth, height: 22)
         .background {
           if pixelStyle {
             Canvas { context, _ in
@@ -6638,14 +6670,6 @@ struct NotchView: View {
     }
     private var visualExpanded: Bool { model.expanded || retainsExpandedContent }
     private var visualSize: CGSize { floatingSize ?? (visualExpanded ? model.expandedNotchSize : model.currentNotchSize) }
-    private var collapsedExternalAgent: AgentActivity? {
-        if model.assistantListening || model.assistantSpeaking { return nil }
-        if let peek = model.visibleAgentTransientPeek { return model.liveAgent(for: peek) }
-        guard let agent = collapsedAgent(model.externalAgentItems),
-              externalAgentPrecedesPersonal(agent.state, assistant: model.assistantIndicator,
-                                           finishing: model.assistantFinishing, outcome: model.assistant.lastOutcome) else { return nil }
-        return agent
-    }
     private var assistantStateLabel: String { model.assistantStateLabel }
     private var musicHeaderVisible: Bool {
         model.mediaLightPlaying && !model.shelfRevealVisible && model.visibleAgentTransientPeek == nil && model.visiblePermissionPeek == nil &&
@@ -6693,7 +6717,7 @@ struct NotchView: View {
             Button { model.select(.monitor); model.expanded = true } label: {
                 Image(systemName: "timer").font(.system(size: 12, weight: .semibold)).frame(width: 19, height: 19)
             }.buttonStyle(.plain).accessibilityLabel("타이머 알람 열기")
-        } else if model.showsCollapsedAgent, let agent = collapsedExternalAgent {
+        } else if model.showsCollapsedAgent, let agent = model.collapsedExternalAgent {
             Button(action: { model.select(.agents); model.expanded = true }) {
                 CollapsedAgentFace(waiting: agentNeedsAttention(agent.state), source: agent.source, state: agent.state, agentID: agent.id, size: notchStatusCharacterSize).id(agent.sessionKey)
                     .modifier(AgentFlightGeometry(namespace: characterMotion, session: agent.sessionKey,
@@ -6756,7 +6780,7 @@ struct NotchView: View {
             }.buttonStyle(.plain).accessibilityLabel("\(title), 타이머 알람 열기")
         } else if model.visibleSystemOverlay {
             Label(model.volumeOverlay, systemImage: model.overlaySymbol).font(.system(size: compact ? 9 : 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
-        } else if model.showsCollapsedAgent, let agent = collapsedExternalAgent {
+        } else if model.showsCollapsedAgent, let agent = model.collapsedExternalAgent {
             Button(action: { model.select(.agents); model.expanded = true }) {
                 if model.usageTrackingEnabled && agentIsRunning(agent.state) {
                     CompactMonitorBadge(model: model)
@@ -8455,7 +8479,8 @@ private struct AgentTransientPreview: View {
         let statusVisible = reduceMotion || rightEntranceVisible || showMonitor
         Button { model.select(.agents); model.expanded = true } label: {
             GeometryReader { geometry in
-                let metrics = agentPeekBandMetrics(width: geometry.size.width, cameraWidth: model.cameraExclusion,
+                let cameraGap = model.cameraExclusion > 0 ? model.cameraExclusion + 8 : 0
+                let metrics = agentPeekBandMetrics(width: geometry.size.width, cameraWidth: cameraGap,
                                                    floating: model.floatingIslandPlacement != nil)
                 let gap = metrics.gap, side = metrics.side
                 HStack(spacing: 0) {
@@ -8479,7 +8504,7 @@ private struct AgentTransientPreview: View {
                     }
                     .scaleEffect(CGFloat(rustAgentPeekEntranceScale(statusVisible ? 1 : 0, reduceMotion ? 1 : 0)))
                     .opacity(statusVisible ? 1 : 0)
-                    .frame(width: min(side, 72), height: geometry.size.height, alignment: .trailing)
+                    .frame(width: min(side, agentPeekLabelWidth), height: geometry.size.height, alignment: .trailing)
                     .frame(width: side, height: geometry.size.height, alignment: .trailing).clipped()
                 }
             }
@@ -11682,12 +11707,20 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     priorityModel.toggleClipboard()
     precondition(priorityModel.clipboardPeek == nil)
     let foldModel = Model(startServices: false)
-    foldModel.agentItems = [AgentActivity(id: "running-fold", project: "fixture", state: "작업 중", activity: "")]
+    foldModel.cameraExclusion = 185
+    foldModel.cameraHeight = 32
+    let running = AgentActivity(id: "running-fold", project: "fixture", state: "작업 중", activity: "")
+    foldModel.agentItems = [running]
+    precondition(foldModel.collapsedNotchSize == CGSize(width: 365, height: 32))
     foldModel.clipboardEnabled = true
     foldModel.showClipboardPeek(.copied, content: .text("fixture"))
     precondition(foldModel.currentNotchShellState == 2)
     foldModel.toggleClipboard()
     precondition(foldModel.currentNotchShellState == 1 && foldModel.foldingDetailToStatus)
+    foldModel.showAgentTransientPeek(running, kind: .running)
+    precondition(foldModel.visibleAgentTransientPeek != nil && foldModel.collapsedNotchSize.width == 365)
+    foldModel.setUsageTrackingEnabled(true)
+    precondition(foldModel.collapsedNotchSize.width == 305)
     let approvalModel = Model(startServices: false)
     let approval = AgentActivity(id: "approval-fixture", project: "fixture", state: "승인 대기", activity: "")
     approvalModel.agentItems = [approval]
@@ -16345,9 +16378,12 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
         model.cpuHistory = [Double(environment["RIUM_MONITOR_CPU"] ?? "45")]
         model.memoryHistory = [Double(environment["RIUM_MONITOR_RAM"] ?? "72")]
         model.pressure = environment["RIUM_MONITOR_PRESSURE"] ?? "정상"
-        if environment["RIUM_MONITOR_AGENT"] == "1" {
-            model.agentItems = [AgentActivity(id: "fixture", project: "시험", state: "작업 중", activity: "")]
+        if environment["RIUM_MONITOR_AGENT"] == "1" || environment["RIUM_MONITOR_AGENT"] == "preview" {
+            let agent = AgentActivity(id: "fixture", project: "시험", state: "작업 중", activity: "")
+            model.agentItems = [agent]
+            if environment["RIUM_MONITOR_AGENT"] == "preview" { model.showAgentTransientPeek(agent, kind: .running) }
             precondition(!model.showsCompactMonitor && model.showsCollapsedAgent)
+            precondition(model.collapsedNotchSize == CGSize(width: 305, height: 32))
         }
     } else if !CommandLine.arguments.contains("--self-test-render-media-only") {
         model.timerState = 1; model.timerRemaining = 1499
