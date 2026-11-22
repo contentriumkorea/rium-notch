@@ -1,11 +1,19 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
 --><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-  <channel>
-    <title>Rium Notch</title>
-    <link>https://github.com/contentriumkorea/rium-notch/releases</link>
-  </channel>
+    <channel>
+        <title>Rium Notch</title>
+        <item>
+            <title>0.2.3</title>
+            <pubDate>Sun, 22 Nov 2026 21:54:34 +0900</pubDate>
+            <sparkle:version>0.2.3</sparkle:version>
+            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/contentriumkorea/rium-notch/releases/download/v0.2.3/Rium-Notch-macOS-arm64-unsigned.dmg" length="9901889" type="application/octet-stream" sparkle:edSignature="TseZflyMYeI7CWVX2FkUZF5LRyT2R3L8sEF1eLB6zJIAIZk8XgKEaD6s1RwJhdycG+3ZWjYvoKP2HihERrXZCg=="></enclosure>
+        </item>
+    </channel>
 </rss><!-- sparkle-signatures:
-edSignature: q3aug+j9tC3J8AC9qKhmopNupFcobasmoANy/UHxUlIGDup84sHg7HoWegHNhPykWgOOfC4s3YP78eFHTYZ7Dw==
-length: 513
+edSignature: 69m0JlNK/lKih3a/Skl3z+dbeQgb9fgnbL81/mOqXB1c8b8xDp+VmpkQBdV3pQQDcoz+SAwDJIYc6UerJMP8DQ==
+length: 1153
 -->
