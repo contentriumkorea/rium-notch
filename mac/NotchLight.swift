@@ -101,8 +101,6 @@ private func rustHumiditySpecks(_ width: Double, _ height: Double, _ scale: Doub
                                 _ output: UnsafeMutablePointer<Double>?, _ capacity: Int) -> Int32
 @_silgen_name("rium_notch_idle_light")
 private func rustNotchIdleLight(_ time: Double, _ reduceMotion: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
-@_silgen_name("rium_notch_idle_shimmer")
-private func rustNotchIdleShimmer(_ time: Double, _ reduceMotion: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
 @_silgen_name("rium_dictation_aurora_palette")
 private func rustDictationAuroraPalette(_ time: Double, _ cycles: Double, _ whiten: Double, _ reduceMotion: Int32,
                                         _ output: UnsafeMutablePointer<Double>?) -> Int32
@@ -113,8 +111,6 @@ private func rustShelfCatchFrame(_ elapsed: Double, _ reduceMotion: Int32, _ out
 @_silgen_name("rium_notch_receiving_tide")
 private func rustReceivingTide(_ elapsed: Double, _ clock: Double, _ progress: Double, _ held: Int32,
                                _ reduceMotion: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
-@_silgen_name("rium_agent_organic_crests")
-private func rustAgentOrganicCrests(_ time: Double, _ acting: Int32, _ thinking: Int32, _ reduceMotion: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
 @_silgen_name("rium_notch_agent_light")
 private func rustNotchAgentLight(_ time: Double, _ reduceMotion: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
 @_silgen_name("rium_notch_question_light")
@@ -123,10 +119,6 @@ private func rustNotchQuestionLight(_ time: Double, _ width: Double, _ reduceMot
 private func rustNotchQuestionPalette(_ time: Double, _ reduceMotion: Int32, _ whiten: Double, _ output: UnsafeMutablePointer<Double>?) -> Int32
 @_silgen_name("rium_notch_question_highlight")
 private func rustNotchQuestionHighlight(_ arm: Double, _ upperArc: Double, _ side: Double, _ lowerArc: Double, _ length: Double, _ output: UnsafeMutablePointer<Double>?) -> Int32
-@_silgen_name("rium_notch_question_crests")
-private func rustNotchQuestionCrests(_ time: Double, _ length: Double, _ output: UnsafeMutablePointer<Double>?) -> Int32
-@_silgen_name("rium_agent_organic_crest_colors")
-private func rustAgentOrganicCrestColors(_ approval: Int32, _ output: UnsafeMutablePointer<Double>?) -> Int32
 @_silgen_name("rium_agent_organic_palette")
 private func rustAgentOrganicPalette(_ time: Double, _ approval: Int32, _ reduceMotion: Int32,
                                      _ whiten: Double, _ output: UnsafeMutablePointer<Double>?) -> Int32
@@ -268,37 +260,39 @@ func musicContourFadeFraction(_ width: CGFloat) -> CGFloat {
     var value = 0.0
     return rustSystemTipFade(Double(width), &value) == 0 ? CGFloat(value) : 0.25
 }
-// Glance's AmbientContour.armRun uses 76, 130, 220 and 680 points for
-// narrow, medium, default and extra-large at unit scale. Individual effects
-// supply their own armRunScale; bound this unit-scale result to the screen.
+// Interpolate after fitting the endpoints to the display so the steps remain even.
+private func interpolatedLightReach(_ preset: String, narrow: CGFloat, widest: CGFloat) -> CGFloat {
+    switch preset {
+    case "narrow": return narrow
+    case "medium": return narrow + (widest - narrow) / 3
+    case "extraLarge": return widest
+    default: return narrow + 2 * (widest - narrow) / 3
+    }
+}
+
 func ambientArmRun(preset: String, screenWidth: CGFloat, notch: CGFloat? = nil) -> CGFloat {
     guard screenWidth.isFinite, screenWidth > 0 else { return 0 }
-    let requested: CGFloat
-    switch preset {
-    case "narrow": requested = 76
-    case "medium": requested = 130
-    case "extraLarge": requested = 680
-    default: requested = 220
-    }
-    return min(requested, max(0, (screenWidth - (notch ?? notchWidth(expanded: false, displayWidth: screenWidth))) / 2))
+    let room = max(0, (screenWidth - (notch ?? notchWidth(expanded: false, displayWidth: screenWidth))) / 2)
+    return interpolatedLightReach(preset, narrow: min(76, room), widest: min(680, room))
 }
-// MusicWaveGlow uses a shorter extra-large arm than AmbientContour.
+
 func musicArmRun(preset: String, screenWidth: CGFloat, notch: CGFloat) -> CGFloat {
     guard screenWidth.isFinite, screenWidth > 0, notch.isFinite, notch >= 0 else { return 0 }
-    switch preset {
-    case "narrow": return 76
-    case "medium": return 130
-    case "extraLarge": return 440
-    default: return 220
-    }
+    return interpolatedLightReach(preset, narrow: 76, widest: 440)
 }
-// shortcut: interpolated arm reach needs comparison with reference transition frames.
-func agentLightArmRun(preset: String, screenWidth: CGFloat, notch: CGFloat, collapsed: CGFloat, expanded: CGFloat) -> CGFloat {
-    let normal = ambientArmRun(preset: preset, screenWidth: screenWidth, notch: notch)
-    guard preset == "extraLarge", [screenWidth, notch, collapsed, expanded].allSatisfy(\.isFinite), expanded > collapsed else { return normal }
-    let progress = min(1, max(0, (notch - collapsed) / (expanded - collapsed)))
-    let wide = max(0, (screenWidth - notch) / 2 - 20)
-    return normal + (wide - normal) * progress
+
+func agentLightArmRun(preset: String, screenWidth: CGFloat, notch: CGFloat, collapsed: CGFloat,
+                      expanded: CGFloat, reachesScreenEdge: Bool = false) -> CGFloat {
+    guard [screenWidth, notch, collapsed, expanded].allSatisfy(\.isFinite), screenWidth > 0 else { return 0 }
+    let room = max(0, (screenWidth - notch) / 2)
+    let narrow = min(76, room)
+    if reachesScreenEdge {
+        return interpolatedLightReach(preset, narrow: narrow, widest: room)
+    }
+    let compact = min(680, room)
+    let progress = expanded > collapsed ? min(1, max(0, (notch - collapsed) / (expanded - collapsed))) : 0
+    let widest = compact + (max(0, room - 20) - compact) * progress
+    return interpolatedLightReach(preset, narrow: narrow, widest: max(narrow, widest))
 }
 
 // Transient effects expire independently of the persistent idle illumination.
@@ -961,8 +955,7 @@ struct PhysicalNotchExclusion: ViewModifier {
     let height: CGFloat
     func body(content: Content) -> some View {
         if width.isFinite && height.isFinite && width > 0 && height > 0 {
-            // shortcut: the eight-point physical corner follows the current
-            // bare-notch shape; exact hardware corner geometry is unverified.
+            // Approximate the fixed hardware cutout independently of the app's shoulder.
             let physicalCorners = NotchCorners(bottom: 8, shoulder: 0)
             content
                 .mask(OutsideNotchMask(notchWidth: width, notchHeight: height, corners: physicalCorners)
@@ -977,7 +970,9 @@ struct PhysicalNotchExclusion: ViewModifier {
 
 // Keep one opaque path alive across state changes. SwiftUI interpolates these
 // dimensions instead of inserting a second black view when the notch opens.
+let notchAnimationDiagnostics = CommandLine.arguments.contains("--self-test-notch-animation")
 var notchAnimationProbe: [CGSize] = []
+var notchPresentedGeometryProbe: [(time: TimeInterval, size: CGSize)] = []
 var notchContentRetentionProbe: [Bool] = []
 
 struct AnimatedNotchBackdrop: Shape {
@@ -990,7 +985,7 @@ struct AnimatedNotchBackdrop: Shape {
     }
     func path(in rect: CGRect) -> Path {
         let w = max(0, width), h = max(0, height)
-        if CommandLine.arguments.contains("--self-test-notch-animation"), notchAnimationProbe.count < 1000 {
+        if notchAnimationDiagnostics, notchAnimationProbe.count < 1000 {
             notchAnimationProbe.append(CGSize(width: w, height: h))
         }
         return NotchSilhouette(corners: corners).path(in: CGRect(x: rect.midX - w / 2, y: rect.minY, width: w, height: h))
@@ -1006,13 +1001,25 @@ private struct NotchOutlinePreference: PreferenceKey {
     static func reduce(value: inout NotchOutlineGeometry, nextValue: () -> NotchOutlineGeometry) { value = nextValue() }
 }
 
+private struct NotchIsResizingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var notchIsResizing: Bool {
+        get { self[NotchIsResizingKey.self] }
+        set { self[NotchIsResizingKey.self] = newValue }
+    }
+}
+
 /// Draw the shell and its light in one window from the same rendered dimensions.
-private struct LitNotchSurface: View, Animatable {
+private struct LitNotchSurface<Content: View>: View, Animatable {
     @ObservedObject var model: Model
     var width: CGFloat
     var height: CGFloat
     var corners: NotchCorners
     var compactLight: CGFloat
+    let content: Content
     var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<AnimatablePair<CGFloat, CGFloat>, CGFloat>> {
         get {
             AnimatablePair(AnimatablePair(width, height),
@@ -1028,21 +1035,35 @@ private struct LitNotchSurface: View, Animatable {
     var body: some View {
         // Music gives way to the idle contour as the panel opens.
         let lightOpacity = min(1, max(0, compactLight * 2))
-        // The hosted view can draw frames without publishing outline preferences.
-        let accentReady = model.expanded || (model.closedAgentAccentReady &&
-            (compactLight == 1 || notchGeometryClose(CGSize(width: width, height: height), corners: corners,
-                targetSize: model.currentNotchOutlineSize, targetCorners: model.currentNotchCorners, tolerance: 2)))
-        ZStack(alignment: .top) {
-            AnimatedNotchBackdrop(width: width, height: height, corners: corners).fill(.black)
-            AnimatedNotchAmbientLight(model: model, notchWidth: width, notchHeight: height,
-                                      corners: corners,
-                                      compactLightOpacity: lightOpacity,
-                                      agentAccentOpacity: accentReady ? 1 : 0)
+        let size = CGSize(width: width, height: height)
+        let followsMorph = !notchGeometryClose(size, corners: corners, targetSize: model.currentNotchOutlineSize,
+                                               targetCorners: model.currentNotchCorners, tolerance: 0.025)
+        GeometryReader { geometry in
+            // Resolve the path here so child shapes cannot interpolate it again.
+            let edge = AnimatedNotchBackdrop(width: width, height: height, corners: corners)
+                .path(in: CGRect(origin: .zero, size: geometry.size))
+            ZStack(alignment: .top) {
+                AnimatedNotchAmbientLight(model: model, notchWidth: width, notchHeight: height,
+                                          corners: corners,
+                                          compactLightOpacity: lightOpacity,
+                                          behindNotch: true,
+                                          morphTime: followsMorph ? ProcessInfo.processInfo.systemUptime : nil)
+                edge.fill(.black).allowsHitTesting(false).accessibilityHidden(true)
+                content
+                    .environment(\.notchIsResizing, followsMorph || model.notchGeometryInMotion)
+                    .transaction { if followsMorph { $0.animation = nil } }
+                    .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
+                    .clipShape(edge)
+                if let peek = model.visibleClipboardPeek, !model.clipboardBadgeFitsHeader {
+                    ClipboardNotchBadge(kind: peek.kind)
+                        .position(x: geometry.size.width / 2 + width / 2 + 12,
+                                  y: min(height, max(32, model.cameraHeight)) / 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
         }
-        .preference(key: NotchOutlinePreference.self,
-                    value: NotchOutlineGeometry(size: CGSize(width: width, height: height), corners: corners))
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        .preference(key: NotchOutlinePreference.self, value: NotchOutlineGeometry(size: size, corners: corners))
     }
 }
 
@@ -1140,21 +1161,18 @@ struct NotchContainer: View {
             } else {
               ZStack(alignment: .top) {
                 LitNotchSurface(model: model, width: outline.width,
-                                height: outline.height, corners: corners, compactLight: model.expanded ? 0 : 1)
+                                height: outline.height, corners: corners, compactLight: model.expanded ? 0 : 1,
+                                content: ZStack(alignment: .top) {
+                    if (model.expanded || retainContentDuringClose) && model.section == .home && cardStyle == "liquid" {
+                        let homeOutline = notchOutlineSize(content: model.expandedNotchSize, expanded: true, screenWidth: model.displayWidth)
+                        HomeAtmosphere(model: model, width: homeOutline.width, height: homeOutline.height)
+                            .transition(.identity)
+                    }
+                    NotchView(model: model, retainsExpandedContent: retainContentDuringClose)
+                        .allowsHitTesting(model.expanded || !retainContentDuringClose)
+                        .accessibilityHidden(!model.expanded && retainContentDuringClose)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top))
                     .animation(shellAnimation, value: geometryState)
-                if (model.expanded || retainContentDuringClose) && model.section == .home && cardStyle == "liquid" {
-                    HomeAtmosphere(model: model, width: notchOutlineSize(content: model.expandedNotchSize, expanded: true, screenWidth: model.displayWidth).width)
-                        .mask(AnimatedNotchBackdrop(width: outline.width, height: outline.height, corners: corners).fill(Color.white).animation(shellAnimation, value: geometryState))
-                        .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
-                        .transition(.identity)
-                }
-                NotchView(model: model, retainsExpandedContent: retainContentDuringClose)
-                    .mask(AnimatedNotchBackdrop(width: outline.width, height: outline.height, corners: corners)
-                        .fill(Color.white)
-                        .animation(shellAnimation, value: geometryState))
-                    .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
-                    .allowsHitTesting(model.expanded || !retainContentDuringClose)
-                    .accessibilityHidden(!model.expanded && retainContentDuringClose)
                 if retainContentDuringClose && !model.expanded {
                     // Old controls stay dormant, but the compact notch still accepts a click.
                     Color.clear
@@ -1193,7 +1211,6 @@ struct NotchContainer: View {
         .onPreferenceChange(NotchOutlinePreference.self) { geometry in
             model.noteRenderedNotchOutline(geometry.size, corners: geometry.corners)
             // Restore the status as soon as the shell is visually compact.
-            // The backdrop and light can finish their spring independently.
             if retainsExpandedContent, !model.expanded, geometry.size.width > 0, geometry.size.height > 0,
                notchGeometryClose(geometry.size, corners: geometry.corners, targetSize: model.currentNotchOutlineSize,
                                   targetCorners: model.currentNotchCorners, tolerance: 2) {
@@ -2200,21 +2217,35 @@ func floatingLightEnvelope(elapsed: TimeInterval, duration: TimeInterval) -> Dou
 func floatingLightReachScale(_ preset: String) -> CGFloat {
     switch preset {
     case "narrow": return 0.50
-    case "medium": return 0.67
-    case "wide": return 0.82
+    case "medium": return 2.0 / 3.0
+    case "wide": return 5.0 / 6.0
     default: return 1.0
+    }
+}
+
+struct NotchLightProfile {
+    let thickness: CGFloat
+    let intensity: Double
+
+    init(_ setting: CGFloat) {
+        let increase = min(2, max(0.5, setting)) - 0.5
+        thickness = 0.25 + 0.95 * increase
+        intensity = min(1, 0.43 + Double(increase) * 0.8)
     }
 }
 
 func drawFloatingHalo(in context: GraphicsContext, path: Path, shading: GraphicsContext.Shading,
                       intensity: Double, active: Bool, thickness: CGFloat, reach: CGFloat) {
     var haze = context
-    haze.opacity = intensity
-    haze.addFilter(.blur(radius: (active ? 9 : 6) * reach))
-    haze.stroke(path, with: shading, style: StrokeStyle(lineWidth: (active ? 12 : 5) * thickness, lineCap: .round, lineJoin: .round))
+    haze.opacity = intensity * 0.64
+    haze.addFilter(.blur(radius: (active ? 7 : 5) * reach))
+    haze.stroke(path, with: shading, style: StrokeStyle(lineWidth: (active ? 8 : 4) * thickness, lineCap: .round, lineJoin: .round))
     var core = context
     core.opacity = intensity
-    core.stroke(path, with: shading, style: StrokeStyle(lineWidth: active ? 3 * thickness : FloatingIslandOutsideMask.edgeWidth + 1.1 * thickness, lineCap: .round, lineJoin: .round))
+    core.addFilter(.blur(radius: 0.65))
+    core.stroke(path, with: shading,
+                style: StrokeStyle(lineWidth: FloatingIslandOutsideMask.edgeWidth + 1.8 * thickness,
+                                   lineCap: .round, lineJoin: .round))
 }
 
 private func floatingCueTint(_ kind: NotchLightCue.Kind, musicTint: NSColor) -> Color {
@@ -2520,6 +2551,7 @@ struct FloatingIslandAmbientLight: View {
             // Shell motion has its own interpolated geometry; only the quiet breathing light needs fewer ticks.
             let animatedFeedback = active || playingMusic || receiving || dictating || showsMusicProgress ||
                 shelfHover || shelfCatch != nil || !cues.isEmpty
+            let profile = NotchLightProfile(thickness)
             let interval = animatedFeedback ? 1.0 / 30.0 : 1.0 / 8.0
             TimelineView(.animation(minimumInterval: interval, paused: paused)) { timeline in
                 let time = ProcessInfo.processInfo.systemUptime
@@ -2528,14 +2560,13 @@ struct FloatingIslandAmbientLight: View {
                     $0.addPath(progressPath)
                     $0.closeSubpath()
                 }
-                let strokeScale = min(2, max(0.5, thickness))
+                let strokeScale = profile.thickness
                 let dictationTime = reduceMotion ? 0.6 : timeline.date.timeIntervalSinceReferenceDate
                 let dictationColors = dictating ? dictationAuroraColors(time: dictationTime, reduceMotion: reduceMotion) : nil
                 Canvas { context, _ in
                     let reach = floatingLightReachScale(lightWidth)
                     let question = state.question
                     let acting = active && state.acting
-                    let length = approximateContourLength(path)
                     let styleTint = NotchLightColor.color(lightBaseColor)
                     if customStyle {
                         drawFloatingNotchStyle(lightStyle, in: &context, contour: path, tint: styleTint,
@@ -2545,37 +2576,30 @@ struct FloatingIslandAmbientLight: View {
                         var palette = [Double](repeating: 0, count: 41 * 3)
                         let paletteStatus = waiting ? palette.withUnsafeMutableBufferPointer {
                             question
-                                ? rustNotchQuestionPalette(time, reduceMotion ? 1 : 0, 0, $0.baseAddress)
-                                : rustAgentOrganicPalette(time, 1, reduceMotion ? 1 : 0, 0, $0.baseAddress)
+                                ? rustNotchQuestionPalette(0, 1, 0, $0.baseAddress)
+                                : rustAgentOrganicPalette(0, 1, 1, 0, $0.baseAddress)
                         } : -1
+                        let brightness = NotchLightBrightness(time: reduceMotion ? nil : time, variation: active ? 0.21 : 0.31)
+                        let left = CGPoint(x: frame.minX, y: frame.midY), right = CGPoint(x: frame.maxX, y: frame.midY)
                         let gradient: GraphicsContext.Shading
                         if waiting && paletteStatus == 0 {
                             let stops = (0..<41).map { index in
-                                Gradient.Stop(color: Color(red: palette[index * 3], green: palette[index * 3 + 1], blue: palette[index * 3 + 2]), location: CGFloat(index) / 40)
+                                let location = CGFloat(index) / 40
+                                return Gradient.Stop(color: Color(red: palette[index * 3], green: palette[index * 3 + 1],
+                                                                  blue: palette[index * 3 + 2]).opacity(brightness.at(location)),
+                                                     location: location)
                             }
                             gradient = .linearGradient(Gradient(stops: stops), startPoint: CGPoint(x: frame.minX, y: frame.midY), endPoint: CGPoint(x: frame.maxX, y: frame.midY))
                         } else {
                             let tint = playingMusic && !active ? Color(nsColor: model.mediaLightColor) : styleTint
-                            gradient = .color(tint)
+                            gradient = .linearGradient(brightness.gradient(tint, opacity: 1, fadesAtEnds: false),
+                                                       startPoint: left, endPoint: right)
                         }
                         var pulse = [Double](repeating: 1, count: 3)
                         _ = pulse.withUnsafeMutableBufferPointer { rustNotchIdleLight(time, reduceMotion ? 1 : 0, $0.baseAddress) }
                         let intensity = active ? 0.45 : (playingMusic ? 0.22 : 0.17 * pulse[0])
                         drawFloatingHalo(in: context, path: path, shading: gradient, intensity: intensity,
                                          active: active, thickness: strokeScale, reach: reach)
-                        if active && !question && !reduceMotion && length > 0 {
-                            var crests = [Double](repeating: 0, count: 4)
-                            var colors = [Double](repeating: 0, count: 6)
-                            let status = crests.withUnsafeMutableBufferPointer { rustAgentOrganicCrests(time, acting ? 1 : 0, !acting && !waiting ? 1 : 0, 0, $0.baseAddress) }
-                            let colorStatus = colors.withUnsafeMutableBufferPointer { rustAgentOrganicCrestColors(waiting ? 1 : 0, $0.baseAddress) }
-                            if status == 0 && colorStatus == 0 {
-                                for index in 0..<2 where crests[index * 2 + 1] > 0 {
-                                    drawAmbientCrest(context: &context, path: path, center: CGFloat(crests[index * 2]), spread: 80 * reach / length,
-                                        color: waiting ? Color(red: colors[index * 3], green: colors[index * 3 + 1], blue: colors[index * 3 + 2]) : styleTint,
-                                        line: 6 * strokeScale, blur: 3, opacity: crests[index * 2 + 1], reach: reach)
-                                }
-                            }
-                        }
                         if !active && !playingMusic && usesCustomAgentLight(lightStyle, waiting: false) {
                             drawFloatingNotchStyle(lightStyle, in: &context, contour: path, tint: styleTint,
                                                    time: reduceMotion ? 0 : time, strength: 0.38,
@@ -2646,6 +2670,7 @@ struct FloatingIslandAmbientLight: View {
                         }
                     }
                 }
+                .opacity(profile.intensity)
                 .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: false).fill(style: FillStyle(eoFill: true)))
                 .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: true).fill(style: FillStyle(eoFill: true)))
                 .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
@@ -2661,7 +2686,8 @@ struct AnimatedNotchAmbientLight: View {
     var notchHeight: CGFloat
     var corners: NotchCorners = .legacy
     var compactLightOpacity: CGFloat? = nil
-    var agentAccentOpacity: Double = 1
+    var behindNotch = false
+    var morphTime: TimeInterval? = nil
     private var notchSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("rium.light.enabled") private var lightEnabled = true
@@ -2710,46 +2736,50 @@ struct AnimatedNotchAmbientLight: View {
         let compactTransition: AnyTransition = compactLightOpacity.map { $0 < 1 ? .identity : .opacity } ?? .opacity
         let mode: AmbientLightMode = lightEnabled ? ambientLightMode(expanded: expandedForLight, agentActive: agentLight && state.active, musicPlaying: musicLight && model.mediaLightPlaying, eventActive: eventActive) : .off
         let agentVariant = agentAmbientVariant(waiting: state.waiting, question: state.question, acting: state.acting)
-        let widthScale = min(2, max(0.5, thickness))
-        GeometryReader { geometry in
+        let profile = NotchLightProfile(thickness)
+        let widthScale = profile.thickness
+        let lighting = GeometryReader { geometry in
             // Allow room for the lower question halo and its blur around the contour.
             let glowHeight = min(geometry.size.height, notchHeight + 2 * NotchContainer.lightPadding)
             let armRun = ambientArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width)
-            let agentArmRun = agentLightArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width,
-                                               collapsed: model.collapsedNotchSize.width, expanded: model.expandedNotchSize.width + 72)
             let tint = NotchLightColor.color(lightBaseColor)
-            if mode == .idle || mode == .agent || (mode == .music && (compactLightOpacity ?? 1) < 1) {
-                TimelineView(.animation(minimumInterval: model.notchGeometryInMotion ? 1.0 / 30.0 : 1.0 / 8.0,
-                                        paused: reduceMotion || (mode == .agent && agentAccentOpacity == 1))) { _ in
-                    NotchIdleLightFrame(time: reduceMotion ? nil : ProcessInfo.processInfo.systemUptime,
+            if mode == .idle || (mode == .music && (compactLightOpacity ?? 1) < 1) {
+                contourFrames(every: 1.0 / 20.0) { time in
+                    NotchIdleLightFrame(time: time,
                                         thickness: widthScale, armRun: armRun, notchSize: notchSize,
-                                        corners: corners, tint: tint, lightStyle: mode == .agent ? "classic" : lightStyle)
+                                        corners: corners, tint: tint, lightStyle: lightStyle)
                 }
                 .frame(height: glowHeight, alignment: .top)
-                .opacity(mode == .agent ? 1 - agentAccentOpacity : (mode == .music ? 1 - (compactLightOpacity ?? 1) : 1))
+                .opacity(mode == .music ? 1 - (compactLightOpacity ?? 1) : 1)
                 .transition(compactTransition)
             }
             if mode == .agent {
                 let waiting = state.waiting
                 let usesCustomStyle = usesCustomAgentLight(lightStyle, waiting: waiting)
+                let agentArmRun = agentLightArmRun(preset: lightWidth, screenWidth: geometry.size.width,
+                    notch: notchSize.width, collapsed: model.collapsedNotchSize.width,
+                    expanded: model.expandedNotchSize.width + 72, reachesScreenEdge: !usesCustomStyle)
                 let question = state.question
                 let acting = state.acting
+                // Keep a continuous contour under the animated accent while it resizes.
+                NotchIdleLightFrame(time: nil, thickness: widthScale, armRun: agentArmRun,
+                                    notchSize: notchSize, corners: corners, tint: waiting ? .orange : tint,
+                                    lightStyle: "classic")
+                    .frame(height: glowHeight, alignment: .top)
+                    .opacity(0.64)
                 Group {
                     if usesCustomStyle {
                         NotchStyleAccent(style: lightStyle, tint: tint,
                                          notchSize: notchSize, armRun: agentArmRun, strength: acting ? 1 : 0.78,
-                                         thickness: widthScale, corners: corners)
+                                         thickness: widthScale, corners: corners, morphTime: morphTime)
                             .modifier(ContourSurfaceAdaptation(enabled: model.menuBarIsLight))
-                    } else if reduceMotion {
-                        NotchAgentLightFrame(tint: waiting ? .orange : tint, time: nil, thickness: widthScale, armRun: agentArmRun, acting: acting, thinking: !acting && !waiting, question: question, approval: waiting && !question, notchSize: notchSize, edgeToEdge: lightWidth == "extraLarge", corners: corners, onLightSurface: model.menuBarIsLight)
                     } else {
-                        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
-                            NotchAgentLightFrame(tint: waiting ? .orange : tint, time: ProcessInfo.processInfo.systemUptime, thickness: widthScale, armRun: agentArmRun, acting: acting, thinking: !acting && !waiting, question: question, approval: waiting && !question, notchSize: notchSize, edgeToEdge: lightWidth == "extraLarge", corners: corners, onLightSurface: model.menuBarIsLight)
+                        contourFrames(every: 1.0 / 60.0) { time in
+                            NotchAgentLightFrame(tint: waiting ? .orange : tint, time: time, thickness: widthScale, armRun: agentArmRun, acting: acting, thinking: !acting && !waiting, question: question, approval: waiting && !question, notchSize: notchSize, edgeToEdge: lightWidth == "extraLarge", corners: corners, onLightSurface: model.menuBarIsLight)
                         }
                     }
                 }
                 .frame(height: usesCustomStyle ? geometry.size.height : glowHeight, alignment: .top)
-                .opacity(agentAccentOpacity)
                 .id(agentVariant)
                 .transition(.opacity)
             } else if mode == .music {
@@ -2801,8 +2831,8 @@ struct AnimatedNotchAmbientLight: View {
                     }
                     if airDropLight && model.receivingFile {
                         let width = notchSize.width, height = notchSize.height
-                        let arm = lightWidth == "extraLarge" ? max(0, (geometry.size.width - width) / 2 - 20)
-                            : ambientArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: width)
+                        let room = max(0, (geometry.size.width - width) / 2)
+                        let arm = interpolatedLightReach(lightWidth, narrow: min(76, room), widest: max(0, room - 20))
                         NotchReceivingLight(notchWidth: width, notchHeight: height, armWidth: arm,
                                             thickness: widthScale, progress: model.receivingFileProgress, started: model.receivingFileStarted,
                                             surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle), corners: corners)
@@ -2811,8 +2841,8 @@ struct AnimatedNotchAmbientLight: View {
                     ForEach(enabledCues) { cue in
                         let width = notchSize.width
                         let height = notchSize.height
-                        let arm = lightWidth == "extraLarge" ? max(0, (geometry.size.width - width) / 2 - 20)
-                            : ambientArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: width)
+                        let room = max(0, (geometry.size.width - width) / 2)
+                        let arm = interpolatedLightReach(lightWidth, narrow: min(76, room), widest: max(0, room - 20))
                         NotchEventLight(cue: cue, notchWidth: width, notchHeight: height, thickness: widthScale,
                                         armWidth: eventArmRun(kind: cue.kind, preset: lightWidth, screenWidth: geometry.size.width,
                                                               notchWidth: width, fallback: arm),
@@ -2833,17 +2863,26 @@ struct AnimatedNotchAmbientLight: View {
         // shortcut: mapping the reference glow transition onto persistent modes needs visual comparison.
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: mode)
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: agentVariant)
-        .animation(reduceMotion ? nil : (agentAccentOpacity == 1 ? .easeOut(duration: 0.16) : .linear(duration: 0.01)),
-                   value: agentAccentOpacity)
-        // The reporter already supplies interpolated geometry; animating the
-        // mask again can let the glow drift into the opaque shell.
-        .mask(OutsideNotchMask(notchWidth: notchWidth, notchHeight: notchHeight, corners: corners)
-            .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
-        .mask(OutsideNotchEdgeMask(notchWidth: notchWidth, notchHeight: notchHeight, corners: corners)
-            .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
+        .opacity(profile.intensity)
+        Group {
+            if behindNotch {
+                lighting
+            } else {
+                lighting.mask(OutsideNotchMask(notchWidth: notchWidth, notchHeight: notchHeight, corners: corners)
+                    .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
+            }
+        }
         .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func contourFrames<Frame: View>(every interval: TimeInterval, paused: Bool = false,
+                                            @ViewBuilder frame: @escaping (TimeInterval?) -> Frame) -> some View {
+        TimelineView(.animation(minimumInterval: interval, paused: paused || reduceMotion || morphTime != nil)) { _ in
+            frame(reduceMotion ? nil : (morphTime ?? ProcessInfo.processInfo.systemUptime))
+        }
     }
 }
 
@@ -3010,8 +3049,37 @@ struct TimerNotchLight: View {
     }
 }
 
-// A subtle idle breath; the exact idle treatment of the original still needs
-// comparison. This is always drawn under the same outside-only notch mask.
+// The contour stays put while neighboring sections brighten independently.
+struct NotchLightBrightness {
+    private static let rhythms: [(period: Double, phase: Double)] = [
+        (11, 0.7), (7, 2.4), (13, 0.1), (9, 3.8), (12, 1.6)
+    ]
+    private let values: [Double]
+
+    init(time: TimeInterval?, variation: Double) {
+        values = Self.rhythms.map { rhythm in
+            guard let time else { return 1 }
+            let phase = time.truncatingRemainder(dividingBy: rhythm.period) / rhythm.period
+            return 1 - variation * (0.5 + 0.5 * sin(2 * .pi * phase + rhythm.phase))
+        }
+    }
+
+    func at(_ position: CGFloat) -> Double {
+        let sample = min(1, max(0, position)) * CGFloat(values.count - 1)
+        let index = Int(sample)
+        return values[index] + (values[min(index + 1, values.count - 1)] - values[index]) * Double(sample - CGFloat(index))
+    }
+
+    func gradient(_ tint: Color, opacity: Double, fadesAtEnds: Bool = true) -> Gradient {
+        let inset = fadesAtEnds ? 0.15 : 0
+        let stops: [Gradient.Stop] = values.enumerated().map { index, value in
+            .init(color: tint.opacity(opacity * value),
+                  location: CGFloat(inset + (1 - 2 * inset) * Double(index) / Double(values.count - 1)))
+        }
+        return Gradient(stops: fadesAtEnds ? [.init(color: .clear, location: 0)] + stops + [.init(color: .clear, location: 1)] : stops)
+    }
+}
+
 func idleLightSpan(screenWidth: CGFloat, notchWidth: CGFloat, armRun: CGFloat) -> CGFloat {
     guard screenWidth.isFinite, notchWidth.isFinite, armRun.isFinite, screenWidth > 0 else { return 0 }
     return min(screenWidth, max(0, notchWidth) + max(0, armRun) * 2)
@@ -3040,45 +3108,23 @@ struct NotchIdleLightFrame: View {
                 let left = (size.width - span) / 2
                 let start = UnitPoint(x: left / size.width, y: 0)
                 let end = UnitPoint(x: (left + span) / size.width, y: 0)
-                let pulseWidth = thickness * CGFloat(frame[2])
-                let strokeWidth = OutsideNotchEdgeMask.strokeWidth + 1.1 * pulseWidth
-                let core = tint.opacity(0.22 * frame[0])
-                let halo = tint.opacity(0.24 * frame[1])
+                let brightness = NotchLightBrightness(time: time, variation: 0.31)
                 ZStack {
                     if usesCustomAgentLight(lightStyle, waiting: false) {
                         Canvas { context, size in
                             drawNotchStyle(lightStyle, in: &context, size: size, notchSize: notchSize, armRun: armRun,
-                                           tint: tint, time: time ?? 0, strength: 0.38,
+                                           tint: tint, time: time ?? 0, strength: 0.22,
                                            thickness: thickness, corners: corners)
                         }
                     }
-                    contour.stroke(LinearGradient(stops: [
-                        .init(color: .clear, location: 0), .init(color: halo, location: 0.25),
-                        .init(color: halo, location: 0.75), .init(color: .clear, location: 1)
-                    ], startPoint: start, endPoint: end),
-                    style: StrokeStyle(lineWidth: 5 * pulseWidth, lineCap: .round, lineJoin: .round))
-                    .blur(radius: 6)
-                    contour.stroke(LinearGradient(stops: [
-                        .init(color: .clear, location: 0), .init(color: core, location: 0.25),
-                        .init(color: core, location: 0.75), .init(color: .clear, location: 1)
-                    ], startPoint: start, endPoint: end),
-                    style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round, lineJoin: .round))
-                    // shortcut: the archived spatial shimmer placement and timing are unknown.
-                    var shimmer = [Double](repeating: 0, count: 2)
-                    let shimmerStatus = shimmer.withUnsafeMutableBufferPointer {
-                        rustNotchIdleShimmer(time ?? 0, time == nil ? 1 : 0, $0.baseAddress)
-                    }
-                    if shimmerStatus == 0 && shimmer[1] > 0 {
-                        let center = CGFloat(shimmer[0]), fade: CGFloat = 0.18
-                        contour.stroke(LinearGradient(stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .clear, location: max(0, center - fade)),
-                            .init(color: tint.opacity(shimmer[1]), location: center),
-                            .init(color: .clear, location: min(1, center + fade)),
-                            .init(color: .clear, location: 1)
-                        ], startPoint: start, endPoint: end),
-                        style: StrokeStyle(lineWidth: 2 * thickness, lineCap: .round, lineJoin: .round))
-                    }
+                    contour.stroke(LinearGradient(gradient: brightness.gradient(tint, opacity: 0.19 * frame[1]),
+                                                   startPoint: start, endPoint: end),
+                                   style: StrokeStyle(lineWidth: 4.5 * thickness, lineCap: .round, lineJoin: .round))
+                        .blur(radius: 4.5)
+                    contour.stroke(LinearGradient(gradient: brightness.gradient(tint, opacity: 0.21 * frame[0]),
+                                                   startPoint: start, endPoint: end),
+                                   style: StrokeStyle(lineWidth: 2.6 * thickness, lineCap: .round, lineJoin: .round))
+                        .blur(radius: 0.6)
                 }
             }
         }
@@ -3104,10 +3150,11 @@ struct NotchAgentLightFrame: View {
             let notch = notchSize?.width ?? notchWidth(expanded: false, displayWidth: size.width)
             let span = edgeToEdge ? size.width : min(size.width, notch + armRun * 2)
             let left = (size.width - span) / 2
+            let brightness = NotchLightBrightness(time: time, variation: acting ? 0.23 : (thinking ? 0.16 : 0.18))
             func questionPalette(whiten: Double) -> [Color] {
                 guard question else { return [] }
                 var values = [Double](repeating: 0, count: 41 * 3)
-                let result = values.withUnsafeMutableBufferPointer { rustNotchQuestionPalette(time ?? 0, time == nil ? 1 : 0, whiten, $0.baseAddress) }
+                let result = values.withUnsafeMutableBufferPointer { rustNotchQuestionPalette(0, 1, whiten, $0.baseAddress) }
                 guard result == 0 else { return [] }
                 return (0..<41).map { Color(red: values[$0 * 3], green: values[$0 * 3 + 1], blue: values[$0 * 3 + 2]) }
             }
@@ -3117,7 +3164,7 @@ struct NotchAgentLightFrame: View {
                 guard approval else { return [] }
                 var values = [Double](repeating: 0, count: 41 * 3)
                 let result = values.withUnsafeMutableBufferPointer {
-                    rustAgentOrganicPalette(time ?? 0, approval ? 1 : 0, time == nil ? 1 : 0, 0, $0.baseAddress)
+                    rustAgentOrganicPalette(0, approval ? 1 : 0, 1, 0, $0.baseAddress)
                 }
                 guard result == 0 else { return [] }
                 return (0..<41).map { Color(red: values[$0 * 3], green: values[$0 * 3 + 1], blue: values[$0 * 3 + 2]) }
@@ -3126,7 +3173,7 @@ struct NotchAgentLightFrame: View {
                 Gradient(stops: colors.enumerated().map { index, color in
                     let location = Double(index) / 40
                     let fade = fadeEnds ? min(1, location / 0.16, (1 - location) / 0.16) : 1
-                    return .init(color: color.opacity(opacity * fade), location: CGFloat(location))
+                    return .init(color: color.opacity(opacity * fade * brightness.at(CGFloat(location))), location: CGFloat(location))
                 })
             }
             var questionPulse = 0.0
@@ -3166,13 +3213,8 @@ struct NotchAgentLightFrame: View {
                     return .linearGradient(questionGradient(organicColors, opacity: opacity, fadeEnds: !edgeToEdge),
                         startPoint: CGPoint(x: left, y: 0), endPoint: CGPoint(x: left + span, y: 0))
                 }
-                if edgeToEdge { return .color(tint.opacity(opacity)) }
-                return .linearGradient(Gradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: tint.opacity(opacity), location: 0.16),
-                    .init(color: tint.opacity(opacity), location: 0.84),
-                    .init(color: .clear, location: 1)
-                ]), startPoint: CGPoint(x: left, y: 0), endPoint: CGPoint(x: left + span, y: 0))
+                return .linearGradient(brightness.gradient(tint, opacity: opacity, fadesAtEnds: !edgeToEdge),
+                    startPoint: CGPoint(x: left, y: 0), endPoint: CGPoint(x: left + span, y: 0))
             }
             if question {
                 var haze = context; haze.addFilter(.blur(radius: 5))
@@ -3204,58 +3246,19 @@ struct NotchAgentLightFrame: View {
             } else {
                 let ink = shading(1)
                 var haze = context
-                haze.opacity *= 0.55 * motion[1]
-                haze.addFilter(.blur(radius: 9))
-                haze.stroke(whole, with: ink, style: StrokeStyle(lineWidth: 12 * thickness, lineCap: .round, lineJoin: .round))
-                let contourStroke = StrokeStyle(lineWidth: 5 * thickness, lineCap: .round, lineJoin: .round)
+                haze.opacity *= 0.30 * motion[1]
+                haze.addFilter(.blur(radius: 7))
+                haze.stroke(whole, with: ink, style: StrokeStyle(lineWidth: 8 * thickness, lineCap: .round, lineJoin: .round))
                 var glow = context
-                glow.opacity *= 0.90 * motion[0]
-                glow.addFilter(.blur(radius: 3))
-                glow.stroke(whole, with: ink, style: contourStroke)
+                glow.opacity *= 0.64 * motion[0]
+                glow.addFilter(.blur(radius: 2.6))
+                glow.stroke(whole, with: ink, style: StrokeStyle(lineWidth: 4 * thickness, lineCap: .round, lineJoin: .round))
                 var core = context
-                core.opacity *= min(1, motion[0])
-                core.stroke(whole, with: ink, style: contourStroke)
+                core.opacity *= min(0.85, 0.85 * motion[0])
+                core.addFilter(.blur(radius: 0.65))
+                core.stroke(whole, with: ink, style: StrokeStyle(lineWidth: 2.2 * thickness, lineCap: .round, lineJoin: .round))
             }
-            if question, let time = time, span > 0 {
-                let arm = max(0, (span - notch) / 2)
-                let crestPath = lightContour(width: notch, height: notchSize?.height ?? notchHeight(expanded: false, section: .home), armWidth: arm, corners: corners)
-                    .applying(CGAffineTransform(translationX: left, y: 0))
-                var frame = [Double](repeating: 0, count: 7)
-                let status = frame.withUnsafeMutableBufferPointer { rustNotchQuestionCrests(time, Double(approximateContourLength(crestPath)), $0.baseAddress) }
-                if status == 0 && frame[3] > 0 {
-                    let color = Color(red: frame[4], green: frame[5], blue: frame[6])
-                    for center in frame.prefix(2) {
-                        drawAmbientCrest(context: &context, path: crestPath, center: CGFloat(center), spread: CGFloat(frame[2]),
-                                         color: color, line: 5 * thickness, blur: 4, opacity: frame[3])
-                    }
-                }
-            } else if !question && time != nil && span > 0 {
-                var values = [Double](repeating: 0, count: 4)
-                let status = values.withUnsafeMutableBufferPointer {
-                    rustAgentOrganicCrests(time ?? 0, acting ? 1 : 0, thinking ? 1 : 0, time == nil ? 1 : 0, $0.baseAddress)
-                }
-                let arm = max(0, (span - notch) / 2)
-                let crestPath = lightContour(width: notch, height: notchSize?.height ?? notchHeight(expanded: false, section: .home), armWidth: arm, corners: corners)
-                    .applying(CGAffineTransform(translationX: left, y: 0))
-                let length = approximateContourLength(crestPath)
-                if status == 0 && length > 0 {
-                    let spread = 80 / length
-                    var colorValues = [Double](repeating: 0, count: 6)
-                    let colorStatus = colorValues.withUnsafeMutableBufferPointer {
-                        rustAgentOrganicCrestColors(approval ? 1 : 0, $0.baseAddress)
-                    }
-                    for index in 0..<2 {
-                        let center = CGFloat(values[index * 2])
-                        let opacity = values[index * 2 + 1]
-                        guard opacity > 0 else { continue }
-                        let color = approval && colorStatus == 0
-                            ? Color(red: colorValues[index * 3], green: colorValues[index * 3 + 1], blue: colorValues[index * 3 + 2])
-                            : tint
-                        drawAmbientCrest(context: &context, path: crestPath, center: center, spread: spread,
-                                         color: color, line: 6 * thickness, blur: 3, opacity: opacity)
-                    }
-                }
-            }
+
         }
         .modifier(ContourSurfaceAdaptation(enabled: onLightSurface))
     }

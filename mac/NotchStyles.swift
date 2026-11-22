@@ -489,12 +489,15 @@ private func islandContourSamples(_ contour: Path, spacing: CGFloat) -> [(CGPoin
 func drawFloatingNotchStyle(_ style: String, in context: inout GraphicsContext, contour: Path,
                             tint: Color, time: TimeInterval, strength: Double, thickness: CGFloat, reach: CGFloat) {
     guard !contour.isEmpty, strength > 0 else { return }
-    let pulse = 0.75 + 0.25 * sin(time * .pi / 3)
+    let bounds = contour.boundingRect
+    let brightness = NotchLightBrightness(time: time == 0 ? nil : time, variation: 0.25)
+    let from = CGPoint(x: bounds.minX, y: bounds.midY), to = CGPoint(x: bounds.maxX, y: bounds.midY)
     if style == "volume" || style == "prism" {
         let volume = style == "volume"
         var halo = context
         halo.addFilter(.blur(radius: (volume ? 12 : 4) * reach))
-        halo.stroke(contour, with: .color(tint.opacity((volume ? 0.28 : 0.38) * strength * pulse)),
+        halo.stroke(contour, with: .linearGradient(brightness.gradient(tint, opacity: (volume ? 0.28 : 0.38) * strength, fadesAtEnds: false),
+                                                   startPoint: from, endPoint: to),
                     style: StrokeStyle(lineWidth: (volume ? 14 : 6) * thickness, lineCap: .round, lineJoin: .round))
         if volume {
             context.stroke(contour, with: .color(tint.opacity(0.32 * strength)), lineWidth: 2.4 * thickness)
@@ -513,11 +516,12 @@ func drawFloatingNotchStyle(_ style: String, in context: inout GraphicsContext, 
     }
     var particles = context
     if style == "cloud" { particles.addFilter(.blur(radius: 9 * reach)) }
-    let origin = contour.boundingRect.origin
+    let origin = bounds.origin
     for (index, sample) in islandContourSamples(contour, spacing: spacing).enumerated() {
         let (anchor, normal) = sample
         let seed = Double(index + 1)
         let random = notchLightNoise(seed * 2.7)
+        let local = brightness.at((anchor.x - bounds.minX) / max(1, bounds.width))
         func point(out: CGFloat, along: CGFloat = 0) -> CGPoint {
             CGPoint(x: anchor.x + normal.dx * out * reach + normal.dy * along,
                     y: anchor.y + normal.dy * out * reach - normal.dx * along)
@@ -549,15 +553,14 @@ func drawFloatingNotchStyle(_ style: String, in context: inout GraphicsContext, 
             glint.addLine(to: CGPoint(x: center.x + 7, y: center.y))
             glint.move(to: CGPoint(x: center.x, y: center.y - 6))
             glint.addLine(to: CGPoint(x: center.x, y: center.y + 6))
-            context.stroke(glint, with: .color(.white.opacity((0.3 + 0.45 * random) * strength * pulse)), lineWidth: 0.65 * thickness)
+            context.stroke(glint, with: .color(.white.opacity((0.3 + 0.45 * random) * strength * local)), lineWidth: 0.65 * thickness)
         default: // Bio and cloud share the particle placement.
             let cloud = style == "cloud"
-            let drift = sin(time * (cloud ? 0.14 : 0.8) + seed) * (cloud ? 3 : 1.8)
-            let center = point(out: (3 + random * 11) * thickness, along: drift)
+            let center = point(out: (3 + random * 11) * thickness)
             let radius = (cloud ? 5 + random * 10 : 0.5 + random * 1.5) * thickness
-            let alpha = cloud ? 0.09 + random * 0.17 : (0.18 + random * 0.50) * pulse
+            let alpha = cloud ? 0.09 + random * 0.17 : 0.18 + random * 0.50
             let bounds = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-            particles.fill(Path(ellipseIn: bounds), with: .color(tint.opacity(alpha * strength)))
+            particles.fill(Path(ellipseIn: bounds), with: .color(tint.opacity(alpha * strength * local)))
         }
     }
 }
@@ -574,7 +577,7 @@ func drawNotchStyle(_ style: String, in context: inout GraphicsContext, size: CG
     let left = size.width / 2 - notchSize.width / 2 - arm
     let right = size.width / 2 + notchSize.width / 2 + arm
     let width = max(1, right - left)
-    let pulse = 0.75 + 0.25 * sin(time * .pi / 3)
+    let brightness = NotchLightBrightness(time: time == 0 ? nil : time, variation: 0.25)
     func contourY(_ x: CGFloat) -> CGFloat {
         let localX = x - (size.width - notchSize.width) / 2
         let y = rustNotchShellContourY(Double(localX), Double(notchSize.width), Double(notchSize.height),
@@ -582,18 +585,13 @@ func drawNotchStyle(_ style: String, in context: inout GraphicsContext, size: CG
         return y.isFinite ? CGFloat(y) : 0
     }
     func armShading(_ color: Color, opacity: Double) -> GraphicsContext.Shading {
-        // shortcut: the exact end fade needs comparison with the reference.
-        .linearGradient(Gradient(stops: [
-            .init(color: .clear, location: 0),
-            .init(color: color.opacity(opacity), location: 0.16),
-            .init(color: color.opacity(opacity), location: 0.84),
-            .init(color: .clear, location: 1)
-        ]), startPoint: CGPoint(x: left, y: 0), endPoint: CGPoint(x: right, y: 0))
+        .linearGradient(brightness.gradient(color, opacity: opacity),
+                        startPoint: CGPoint(x: left, y: 0), endPoint: CGPoint(x: right, y: 0))
     }
     switch style {
     case "volume":
         var fog = context; fog.addFilter(.blur(radius: 12))
-        fog.stroke(contour, with: armShading(tint, opacity: 0.28 * strength * pulse),
+        fog.stroke(contour, with: armShading(tint, opacity: 0.28 * strength),
                    style: StrokeStyle(lineWidth: 14 * thickness, lineCap: .round, lineJoin: .round))
         context.stroke(contour, with: armShading(.white, opacity: 0.24 * strength),
                        style: StrokeStyle(lineWidth: 2.4 * thickness, lineCap: .round, lineJoin: .round))
@@ -643,10 +641,9 @@ func drawNotchStyle(_ style: String, in context: inout GraphicsContext, size: CG
         for index in 0..<180 {
             let seed = Double(index + 1)
             let x = left + width * CGFloat(notchLightNoise(seed * 1.7))
-            let motion = sin(time * 0.8 + seed) * 1.8
-            let y = contourY(x) + 1 + CGFloat(notchLightNoise(seed * 2.7) * 12 + motion)
+            let y = contourY(x) + 1 + CGFloat(notchLightNoise(seed * 2.7) * 12)
             let radius = CGFloat(0.5 + notchLightNoise(seed * 6.3) * 1.5) * thickness
-            let opacity = (0.18 + notchLightNoise(seed * 8.7) * 0.50) * strength * pulse
+            let opacity = (0.18 + notchLightNoise(seed * 8.7) * 0.50) * strength * brightness.at((x - left) / width)
             context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2)), with: .color(tint.opacity(opacity)))
         }
     case "prism":
@@ -657,18 +654,17 @@ func drawNotchStyle(_ style: String, in context: inout GraphicsContext, size: CG
             var star = Path()
             star.move(to: CGPoint(x: x - 13, y: y)); star.addLine(to: CGPoint(x: x + 13, y: y))
             star.move(to: CGPoint(x: x, y: y - 8)); star.addLine(to: CGPoint(x: x, y: y + 8))
-            context.stroke(star, with: .color(.white.opacity(0.45 * strength * pulse)), lineWidth: 0.65 * thickness)
+            context.stroke(star, with: .color(.white.opacity(0.45 * strength * brightness.at((x - left) / width))), lineWidth: 0.65 * thickness)
         }
     case "cloud":
         var mist = context; mist.addFilter(.blur(radius: 9))
         for index in 0..<28 {
             let seed = Double(index + 1)
-            let drift = CGFloat(sin(time * 0.14 + seed) * 3)
-            let x = left + width * CGFloat(notchLightNoise(seed * 1.3)) + drift
+            let x = left + width * CGFloat(notchLightNoise(seed * 1.3))
             let y = contourY(x) + CGFloat(3 + notchLightNoise(seed * 2.1) * 20)
             let radius = CGFloat(5 + notchLightNoise(seed * 3.1) * 10) * thickness
             mist.fill(Path(ellipseIn: CGRect(x: x - radius, y: y, width: radius * 2, height: radius)),
-                      with: .color(tint.opacity((0.09 + notchLightNoise(seed * 4.4) * 0.18) * strength)))
+                      with: .color(tint.opacity((0.09 + notchLightNoise(seed * 4.4) * 0.18) * strength * brightness.at((x - left) / width))))
         }
     default: break
     }
@@ -682,20 +678,28 @@ struct NotchStyleAccent: View {
     let strength: Double
     let thickness: CGFloat
     var corners: NotchCorners = .legacy
+    var morphTime: TimeInterval?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    init(style: String, tint: Color, notchSize: CGSize, armRun: CGFloat, strength: Double, thickness: CGFloat = 1, corners: NotchCorners = .legacy) {
-        self.style = style; self.tint = tint; self.notchSize = notchSize
-        self.armRun = armRun; self.strength = strength; self.thickness = thickness; self.corners = corners
+
+    init(style: String, tint: Color, notchSize: CGSize, armRun: CGFloat, strength: Double,
+         thickness: CGFloat = 1, corners: NotchCorners = .legacy, morphTime: TimeInterval? = nil) {
+        self.style = style; self.tint = tint; self.notchSize = notchSize; self.armRun = armRun
+        self.strength = strength; self.thickness = thickness; self.corners = corners
+        self.morphTime = morphTime
     }
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: notchStyleTimelinePaused(style, reduceMotion: reduceMotion))) { _ in
-            let time = reduceMotion ? 0 : ProcessInfo.processInfo.systemUptime
-            Canvas { context, size in
-                drawNotchStyle(style, in: &context, size: size, notchSize: notchSize, armRun: armRun,
-                               tint: tint, time: time,
-                               strength: strength, thickness: thickness, corners: corners)
-            }
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0,
+                                paused: morphTime != nil || notchStyleTimelinePaused(style, reduceMotion: reduceMotion))) { _ in
+            frame(at: reduceMotion ? 0 : (morphTime ?? ProcessInfo.processInfo.systemUptime))
         }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+
+    private func frame(at time: TimeInterval) -> some View {
+        Canvas { context, size in
+            drawNotchStyle(style, in: &context, size: size, notchSize: notchSize, armRun: armRun,
+                           tint: tint, time: time, strength: strength, thickness: thickness, corners: corners)
+        }
     }
 }
 
@@ -723,7 +727,8 @@ struct NotchStyleSample: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let thickness = min(2, max(0.5, lightThickness))
+            let profile = NotchLightProfile(lightThickness)
+            let thickness = profile.thickness
             if floating {
                 let size = geometry.size
                 let islandWidth = min(128, size.width * 0.62)
@@ -743,13 +748,16 @@ struct NotchStyleSample: View {
                                                    time: time, strength: sampleStrength, thickness: previewThickness, reach: reach)
                         }
                     }
+                    .opacity(profile.intensity)
                     .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: false).fill(style: FillStyle(eoFill: true)))
                     .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: true).fill(style: FillStyle(eoFill: true)))
                     .background { path.fill(.black) }
                 }
             } else {
                 let notch = CGSize(width: min(82, geometry.size.width * 0.48), height: 23)
-                let liveArm = ambientArmRun(preset: widthPreset, screenWidth: displayWidth, notch: liveNotchWidth)
+                let liveArm = agentLightArmRun(preset: widthPreset, screenWidth: displayWidth, notch: liveNotchWidth,
+                                                 collapsed: liveNotchWidth, expanded: liveNotchWidth,
+                                                 reachesScreenEdge: style == "classic")
                 let liveRoom = (displayWidth - liveNotchWidth) / 2
                 let reach = liveRoom > 0 ? liveArm / liveRoom : 0
                 let arm = max(0, (geometry.size.width - notch.width) / 2) * reach
@@ -763,8 +771,8 @@ struct NotchStyleSample: View {
                                          armRun: arm, strength: sampleStrength, thickness: thickness)
                     }
                 }
+                .opacity(profile.intensity)
                 .mask(OutsideNotchMask(notchWidth: notch.width, notchHeight: notch.height).fill(style: FillStyle(eoFill: true)))
-                .mask(OutsideNotchEdgeMask(notchWidth: notch.width, notchHeight: notch.height).fill(style: FillStyle(eoFill: true)))
                 .background(alignment: .top) {
                     NotchSilhouette().fill(.black).frame(width: notch.width, height: notch.height)
                 }

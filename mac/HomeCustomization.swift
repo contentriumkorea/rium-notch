@@ -254,7 +254,12 @@ struct HomeEditorOptions: View {
                     }
                 }.padding(3)
             }.frame(height: 87)
-            Text("홈 배경").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            HStack {
+                Text("홈 배경").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Codex 사용량 패널", isOn: Binding(get: { model.homeShowsCodexUsage }, set: { model.setHomeShowsCodexUsage($0) }))
+                    .toggleStyle(.switch).controlSize(.mini).font(.system(size: 11))
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 12) {
                     ForEach(HomeBackground.allCases) { background in
@@ -282,6 +287,82 @@ struct HomeEditorOptions: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+struct HomeCodexUsagePanel: View {
+    static let height: CGFloat = 102
+    @ObservedObject var model: Model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Codex 구독 사용 한도").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Button { model.listAccounts() } label: {
+                    Label("새로고침", systemImage: "arrow.clockwise")
+                        .padding(.horizontal, 7).padding(.vertical, 3).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+            if model.accounts.isEmpty {
+                Text(model.message.isEmpty ? "연결된 계정 없음" : model.message).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            } else {
+                GeometryReader { geometry in
+                    let gap: CGFloat = 18
+                    let columns = min(model.accounts.count, 2)
+                    let columnWidth = (geometry.size.width - CGFloat(columns - 1) * gap) / CGFloat(columns)
+                    ScrollView(.horizontal) {
+                        LazyHStack(alignment: .top, spacing: gap) {
+                            ForEach(model.accounts) { account in
+                                accountDetails(account)
+                                    .frame(width: max(0, columnWidth), height: geometry.size.height, alignment: .topLeading)
+                            }
+                        }
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollIndicators(model.accounts.count > 2 ? .automatic : .hidden)
+                }
+            }
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: Self.height)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func accountDetails(_ account: Account) -> some View {
+        ViewThatFits(in: .vertical) {
+            accountRows(account).fixedSize(horizontal: false, vertical: true)
+            ScrollView(.vertical) {
+                accountRows(account)
+            }
+            .scrollIndicators(.never)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    private func accountRows(_ account: Account) -> some View {
+        let summary = account.secondaryRemaining.flatMap { $0.isWeekly ? $0 : nil } ?? account.remaining
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(account.name).fontWeight(.semibold)
+                if let summary, summary.reset.map({ $0 > model.now }) ?? true {
+                    Text(summary.isWeekly ? "주간 잔여 \(summary.percent)%" : "\(summary.percent)% 남음")
+                        .monospacedDigit().fixedSize()
+                }
+            }
+            Text(account.usage).foregroundStyle(.secondary)
+            if !account.detail.isEmpty { Text(account.detail).foregroundStyle(.secondary) }
+            if let updatedAt = account.usageUpdatedAt {
+                Text("연결됨 · 갱신 \(updatedAt.formatted(date: .omitted, time: .standard))")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            ForEach(Array(account.additionalUsage.enumerated()), id: \.offset) { _, line in
+                Text(line).foregroundStyle(.secondary)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct HomeVariantPreview: View {
     @ObservedObject var model: Model
     let slot: HomeSlot

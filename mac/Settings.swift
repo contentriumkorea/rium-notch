@@ -355,8 +355,11 @@ struct SettingsView: View {
                     }
                     HStack {
                         Button("ChatGPT 계정 추가…") { model.addAccount() }
-                        if let account = model.accounts.first(where: { $0.id == model.monitorAccountID }), !account.connected {
-                            Button("선택한 계정으로 로그인") { model.login(account.id) }
+                        if let account = model.accounts.first(where: { $0.id == model.monitorAccountID }) {
+                            if !account.connected {
+                                Button("선택한 계정으로 로그인") { model.login(account.id) }
+                            }
+                            Button("선택한 계정 연결 해제…", role: .destructive) { model.removeAccount(account) }
                         }
                     }
                     if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary) }
@@ -760,12 +763,16 @@ struct SettingsView: View {
                 Toggle("노치 조명", isOn: $lightEnabled)
                 Group {
                     Toggle("에이전트 상태 조명", isOn: $agentLight)
-                    Toggle("에이전트 상태 변화 시 화면 파동", isOn: $agentScreenWave).disabled(!agentLight || lightStyle == "classic")
+                    Toggle("에이전트 상태 변화 시 화면 파동", isOn: $agentScreenWave).disabled(!agentLight)
                     Picker("에이전트 화면 파동 빈도", selection: $agentWaveMode) {
                         Text("균형").tag("balanced")
                         Text("모든 변화").tag("every")
-                    }.pickerStyle(.segmented).disabled(!agentLight || !agentScreenWave || lightStyle == "classic")
-                    Text("에이전트가 시작하거나 확인을 요청하거나 작업을 마칠 때 빛이 퍼집니다. 가까운 시각의 변화는 합쳐질 수 있으며 저전력 모드에서는 표시하지 않습니다.")
+                    }.pickerStyle(.segmented).disabled(!agentLight || !agentScreenWave)
+                    Text(lightStyle == "classic"
+                         ? "클래식에서는 에이전트가 작업을 마칠 때 화면에 빛이 퍼집니다."
+                         : "에이전트가 시작하거나 확인을 요청하거나 작업을 마칠 때 빛이 퍼집니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("가까운 시각의 변화는 합쳐질 수 있으며 저전력 모드에서는 표시하지 않습니다.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("받아쓰기 중 빛 표시", isOn: $dictationLight)
                     Toggle("음악 재생 중 빛 물결 표시", isOn: $musicLight)

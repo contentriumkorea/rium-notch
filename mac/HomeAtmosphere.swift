@@ -107,16 +107,16 @@ private final class HomeTextureImages: ObservableObject {
 struct HomeAtmosphere: View {
     @ObservedObject var model: Model
     let width: CGFloat
+    let height: CGFloat
     private var tint: Color { Color(nsColor: model.mediaLightColor) }
     private var hasAgent: Bool { model.showsCollapsedAgent }
     var body: some View {
-        let height: CGFloat = 178
         Canvas { context, size in
             let area = CGRect(origin: .zero, size: size)
             let base: Color = model.homeBackground == .graphite ? .white : Color(red: 0.55, green: 0.68, blue: 0.82)
             context.fill(Path(area), with: .linearGradient(
                 Gradient(stops: [.init(color: .clear, location: 0), .init(color: base.opacity(0.045), location: 0.35), .init(color: base.opacity(0.09), location: 1)]),
-                startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: height)))
+                startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
             let agentTint = Color(red: 0.25, green: 0.52, blue: 0.82)
             if model.homeBackground == .dynamic || model.homeBackground == .blue {
                 let strength = model.homeBackground == .blue ? 0.34 : (hasAgent ? 0.28 : 0.14)
@@ -140,7 +140,7 @@ struct HomeAtmosphere: View {
                 context.fill(Path(CGRect(x: x, y: y, width: 0.45, height: 0.45)), with: .color(.white.opacity(opacity)))
             }
         }
-        .frame(width: width, height: height)
+        .frame(width: width, height: max(0, height - 32))
         .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .white.opacity(0.65), location: 0.18), .init(color: .white, location: 0.48), .init(color: .white.opacity(0.85), location: 1)], startPoint: .top, endPoint: .bottom))
         .padding(.top, 32)
         .allowsHitTesting(false)

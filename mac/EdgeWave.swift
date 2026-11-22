@@ -24,6 +24,10 @@ func edgeWaveFallbackColor(_ color: (red: Double, green: Double, blue: Double), 
 }
 
 extension NotchLightCue.Kind {
+    func supportsAgentScreenWave(style: String) -> Bool {
+        self == .agentDone || style != "classic"
+    }
+
     var isClipboardScreenWave: Bool {
         switch self {
         case .clipboard, .clipboardPaste, .shortcut(.paste): return true
@@ -101,7 +105,7 @@ private struct AnimatedFullScreenEdgeWave: View {
 
     var body: some View {
         let visibleWaves = model.notchScreenWaves.filter { wave in
-            wave.kind.isClipboardScreenWave ? clipboardLight && enabled : agentLight && agentScreenWave && lightStyle != "classic"
+            wave.kind.isClipboardScreenWave ? clipboardLight && enabled : agentLight && agentScreenWave && wave.kind.supportsAgentScreenWave(style: lightStyle)
         }
         GeometryReader { geometry in
           let frame = island?.frame ?? CGRect(x: (geometry.size.width - notchWidth) / 2, y: 0,

@@ -12,8 +12,8 @@ struct DashboardHome: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let available = max(100, geometry.size.width - 21)
-            HStack(spacing: 7) {
+            let available = max(100, geometry.size.width - 3 * notchPanelSpacing)
+            HStack(spacing: notchPanelSpacing) {
                 music.frame(width: available * 0.39)
                 weather.frame(width: available * 0.18)
                 calendar.frame(width: available * 0.20)

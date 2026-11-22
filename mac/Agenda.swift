@@ -91,7 +91,9 @@ final class AgendaModel: ObservableObject {
     @Published private(set) var todayEventCount = 0
     @Published private(set) var weekEventDays: Set<Date> = []
     @Published private(set) var monthEventDays: Set<Date> = []
-    @Published private(set) var calendarReadable = false
+    @Published private(set) var calendarAccess: EKAuthorizationStatus = .notDetermined
+    @Published private(set) var calendarRequesting = false
+    var calendarReadable: Bool { calendarAccess == .fullAccess }
     @Published private(set) var calendarLoading = false
     @Published var reminders: [Item] = []
     @Published var calendarStatus = "일정 권한 필요"
@@ -104,7 +106,6 @@ final class AgendaModel: ObservableObject {
     private(set) var reminderGeneration = 0
     private let observationStarted = Date()
     private var announcedAdditions: [String: Date] = [:]
-    private var lastCalendarAccess: EKAuthorizationStatus?
     private var lastReminderAccess: EKAuthorizationStatus?
 
     init(autoRefresh: Bool = true) {
@@ -129,17 +130,14 @@ final class AgendaModel: ObservableObject {
     }
 
     func refreshAuthorized() {
-        lastCalendarAccess = EKEventStore.authorizationStatus(for: .event)
+        refreshCalendarAccess()
         lastReminderAccess = EKEventStore.authorizationStatus(for: .reminder)
-        calendarReadable = lastCalendarAccess == .fullAccess
-        if lastCalendarAccess == .fullAccess { refreshCalendar() }
-        else { calendarGeneration += 1; events = []; todayEvents = []; todayEventCount = 0; weekEventDays = []; monthEventDays = []; calendarLoading = false; calendarStatus = "일정 권한 필요" }
         if lastReminderAccess == .fullAccess { refreshReminders() }
         else { clearReminders(status: "미리 알림 권한 필요") }
     }
 
     func refreshIfAuthorizationChanged() {
-        if EKEventStore.authorizationStatus(for: .event) != lastCalendarAccess || EKEventStore.authorizationStatus(for: .reminder) != lastReminderAccess {
+        if EKEventStore.authorizationStatus(for: .event) != calendarAccess || EKEventStore.authorizationStatus(for: .reminder) != lastReminderAccess {
             refreshAuthorized()
         }
     }
@@ -148,21 +146,66 @@ final class AgendaModel: ObservableObject {
         todayEvents = []; todayEventCount = 0; weekEventDays = []; monthEventDays = []
     }
 
+    private func refreshCalendarAccess() {
+        let access = EKEventStore.authorizationStatus(for: .event)
+        if calendarAccess != access { calendarAccess = access }
+        guard !calendarRequesting else { return }
+        if calendarReadable {
+            refreshCalendar()
+        } else {
+            calendarGeneration += 1
+            events = []
+            invalidateToday()
+            calendarLoading = false
+            switch access {
+            case .denied, .writeOnly: calendarStatus = "시스템 설정에서 Rium Notch에 캘린더 전체 접근을 허용해 주세요"
+            case .restricted: calendarStatus = "이 Mac에서 캘린더 접근이 제한되어 있습니다"
+            default: calendarStatus = "일정 권한 필요"
+            }
+        }
+    }
+
+    var calendarActionTitle: String {
+        switch calendarAccess {
+        case .denied, .writeOnly: return "캘린더 설정 열기"
+        default: return "일정 불러오기"
+        }
+    }
+
     func loadCalendar() {
-        store.requestFullAccessToEvents { [weak self] granted, error in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                guard granted, error == nil else { self.calendarReadable = false; self.events = []; self.todayEvents = []; self.todayEventCount = 0; self.weekEventDays = []; self.monthEventDays = []; self.calendarLoading = false; self.calendarStatus = "캘린더 접근을 허용해 주세요"; return }
-                self.calendarReadable = true
-                self.refreshCalendar()
+        guard !calendarRequesting, !calendarLoading else { return }
+        refreshCalendarAccess()
+        switch calendarAccess {
+        case .fullAccess, .restricted:
+            return
+        case .denied, .writeOnly:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
+                NSWorkspace.shared.open(url)
+            }
+        default:
+            calendarRequesting = true
+            calendarStatus = "캘린더 접근 요청 중…"
+            NSApp.activate(ignoringOtherApps: true)
+            let store = self.store
+            calendarQueue.async { [weak self] in
+                store.requestFullAccessToEvents { _, error in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.calendarRequesting = false
+                        self.refreshCalendarAccess()
+                        if error != nil && self.calendarAccess == .notDetermined {
+                            self.calendarStatus = "캘린더 접근을 요청하지 못했습니다. 다시 시도해 주세요"
+                        }
+                    }
+                }
             }
         }
     }
 
     private func refreshCalendar() {
-        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return }
         calendarGeneration += 1; let generation = calendarGeneration
         calendarLoading = true
+        calendarStatus = "일정 불러오는 중…"
         let store = self.store
         calendarQueue.async { [weak self] in
             guard let self = self else { return }

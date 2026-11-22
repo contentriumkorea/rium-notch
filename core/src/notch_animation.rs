@@ -294,11 +294,6 @@ pub extern "C" fn rium_notch_agent_switcher_index(count: i64, current: i64, dire
     (current + i64::from(direction)).rem_euclid(count)
 }
 
-#[no_mangle]
-pub extern "C" fn rium_notch_closed_accent_delay(missing_rendered_outline: i32) -> f64 {
-    if missing_rendered_outline == 1 { 0.44 } else { 0.04 }
-}
-
 /// Reference BandFold: top-anchored x/y scale, blur radius, and opacity.
 /// Progress 0 is fully visible; progress 1 is folded out.
 pub fn band_fold_frame(progress: f64) -> Option<[f64; 4]> {
@@ -315,17 +310,20 @@ pub unsafe extern "C" fn rium_notch_band_fold_frame(progress: f64, output: *mut 
     0
 }
 
-/// AgentStatusArrivalGlow's AmbientContour uses an armRunScale of 2.2.
-/// The analyzed Glance Rium Notch binary caps the scaled arm at 768 points.
-/// Rium additionally clips the arm to its available screen-width surface;
-/// the original's complete panel clipping has not been visually compared.
+/// The four arrival light widths divide the available range into equal steps.
 pub fn agent_arrival_arm_run(preset: i32, screen_width: f64, notch_width: f64) -> Option<f64> {
-    if !screen_width.is_finite() || !notch_width.is_finite() || screen_width <= 0.0 || notch_width < 0.0 {
+    if !(0..=3).contains(&preset)
+        || !screen_width.is_finite()
+        || !notch_width.is_finite()
+        || screen_width <= 0.0
+        || notch_width < 0.0
+    {
         return None;
     }
-    let base: f64 = match preset { 0 => 76.0, 1 => 130.0, 2 => 220.0, 3 => 680.0, _ => return None };
-    // shortcut: clipping to this surface is Rium-specific until frame comparison.
-    Some((base * 2.2).min(768.0).min(((screen_width - notch_width) / 2.0).max(0.0)))
+    let room = ((screen_width - notch_width) / 2.0).max(0.0);
+    let narrow = room.min(76.0 * 2.2);
+    let widest = room.min(768.0);
+    Some(narrow + (widest - narrow) * f64::from(preset) / 3.0)
 }
 
 #[no_mangle]
@@ -405,7 +403,7 @@ pub extern "C" fn rium_notch_panel_retention(expanded: i32, shell: i32, was_reta
 pub fn shell_corner_geometry(state: i32) -> Option<[f64; 2]> {
     match state {
         0..=2 | 4 => Some([16.0, 20.0]),
-        3 => Some([8.0, 0.0]),
+        3 => Some([8.0, 12.0]),
         5 => Some([28.0, 36.0]),
         _ => None,
     }
@@ -1310,7 +1308,7 @@ mod shell_corner_tests {
         for state in [0, 1, 2, 4] {
             assert_eq!(shell_corner_geometry(state), Some([16.0, 20.0]));
         }
-        assert_eq!(shell_corner_geometry(3), Some([8.0, 0.0]));
+        assert_eq!(shell_corner_geometry(3), Some([8.0, 12.0]));
         assert_eq!(shell_corner_geometry(5), Some([28.0, 36.0]));
         assert_eq!(shell_corner_geometry(-1), None);
         assert_eq!(shell_corner_geometry(6), None);
@@ -2962,7 +2960,7 @@ pub fn idle_shimmer_frame(time: f64, reduce_motion: bool) -> Option<[f64; 2]> {
     let t = time.rem_euclid(70.0);
     // Separate the traveling highlight from the six-second brightness breath.
     let position = 0.5 + 0.20 * (2.0 * PI * t / 14.0).sin() + 0.07 * (2.0 * PI * t / 35.0).sin();
-    let strength = 0.025 + 0.008 * (2.0 * PI * t / 10.0).sin();
+    let strength = 0.055 + 0.014 * (2.0 * PI * t / 10.0).sin();
     Some([position, strength])
 }
 
@@ -4474,7 +4472,7 @@ mod shortcut_tests {
     fn idle_shimmer_is_subtle_periodic_and_respects_reduce_motion() {
         let start = idle_shimmer_frame(0.0, false).unwrap();
         let later = idle_shimmer_frame(3.75, false).unwrap();
-        assert!(later[0] > start[0] && later[1] < 0.04);
+        assert!(later[0] > start[0] && later[1] > start[1]);
         assert_ne!(idle_shimmer_frame(14.0, false).unwrap()[0], start[0]);
         assert_eq!(idle_shimmer_frame(70.0, false), Some(start));
         let before = idle_shimmer_frame(70.0 - 1e-6, false).unwrap();
@@ -4482,7 +4480,7 @@ mod shortcut_tests {
         for (left, right) in before.iter().zip(after) { assert!((left - right).abs() < 1e-6); }
         for step in 0..700 {
             let [position, strength] = idle_shimmer_frame(step as f64 / 10.0, false).unwrap();
-            assert!((0.22..=0.78).contains(&position) && (0.016..=0.034).contains(&strength));
+            assert!((0.22..=0.78).contains(&position) && (0.040..=0.070).contains(&strength));
         }
         assert_eq!(idle_shimmer_frame(10.0, true), Some([0.5, 0.0]));
         assert!(idle_shimmer_frame(f64::NAN, false).is_none());

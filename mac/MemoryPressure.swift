@@ -30,8 +30,7 @@ func currentMemoryPressure() -> String? {
 }
 
 struct CompactMonitorBadge: View {
-    static let size: CGFloat = 26
-    static let sideInset: CGFloat = 10
+    static let size: CGFloat = 18
 
     @ObservedObject var model: Model
     var diameter: CGFloat = CompactMonitorBadge.size
