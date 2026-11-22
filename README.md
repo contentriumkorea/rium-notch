@@ -8,7 +8,7 @@
 
 ## 빠르게 시작하기
 
-[Mac용 DMG 다운로드 (Apple silicon) →](https://github.com/contentriumkorea/rium-notch/releases/latest/download/Rium-Notch-macOS-arm64-unsigned.dmg)
+[Mac용 DMG 다운로드 (Apple silicon) →](https://github.com/contentriumkorea/rium-notch/releases/latest)
 
 macOS 14 이상의 Apple silicon Mac을 대상으로 한 미리보기입니다. DMG의 앱을 Applications 폴더에 복사하세요. **Apple Developer ID 서명과 공증이 없어 macOS가 다운로드한 앱의 실행을 차단할 수 있습니다.** 다른 Mac에서 설치와 실행은 검증하지 않았습니다.
 
@@ -62,7 +62,7 @@ open '../Rium Notch.app'
 
 이 프로젝트는 개발 중이며 기능·디자인과 안정성이 계속 바뀝니다. 사용량 추적 기능과 일부 조명 스타일은 준비 중입니다. macOS 권한을 사용하는 기능, 다른 기기에서의 AirDrop, 다양한 화면 환경과 서명된 배포는 추가 검증이 필요합니다. 음악 제어는 macOS 비공개 MediaRemote 인터페이스를 사용하므로 OS 업데이트에 따라 동작이 달라질 수 있습니다. Codex·Claude 연동은 로컬 세션 정보를 읽으며 일부 상태는 기존 Glance 로컬 상태 파일을 참조할 수 있습니다.
 
-앱의 업데이트 확인은 GitHub 릴리스를 조회하고 릴리스 페이지를 엽니다. 자동 다운로드 또는 설치는 제공하지 않습니다. 네트워크 기능과 권한에 대한 설명은 [상세 안내](docs/BUILD.md)를 참고하세요.
+서명·공증된 배포본의 설정에서 **업데이트**를 누르면 GitHub에서 새 버전을 내려받아 검증한 뒤 앱을 교체하고 다시 엽니다. 현재 공개된 미리보기는 DMG에서 설치해야 합니다. 배포 조건과 네트워크 기능은 [상세 안내](docs/BUILD.md)를 참고하세요.
 
 <details><summary><strong>English overview</strong></summary>
 

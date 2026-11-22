@@ -295,12 +295,12 @@ struct SettingsView: View {
                         Text(appVersion).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("확인") { updater.check() }.disabled(updater.checking)
-                    if updater.releaseURL != nil { Button("릴리스 열기") { updater.openRelease() } }
+                    Button("업데이트") { updater.check(install: true) }
+                        .disabled(updater.checking || updater.installing)
+                    if updater.releaseURL != nil { Button("릴리스 정보") { updater.openRelease() } }
                 }
                 Text(updater.status).font(.caption).foregroundStyle(.secondary)
                 Toggle("GitHub 릴리스 자동 확인", isOn: Binding(get: { updater.autoCheck }, set: { updater.setAutoCheck($0) }))
-                Text("설치는 릴리스 페이지에서 직접 확인합니다.").font(.caption).foregroundStyle(.secondary)
             }
             SettingsCard(title: "창 모양") {
                 HStack(spacing: 14) {

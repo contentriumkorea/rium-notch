@@ -2,32 +2,45 @@ import AppKit
 import Foundation
 import Combine
 
-/// Checks public GitHub releases. Installation is deliberately left to the user.
 final class UpdateController: ObservableObject {
     private static let api = URL(string: "https://api.github.com/repos/contentriumkorea/rium-notch/releases/latest")!
     private static let releasePrefix = "/contentriumkorea/rium-notch/releases/tag/"
     @Published private(set) var status = "GitHub에서 업데이트를 확인합니다."
     @Published private(set) var checking = false
+    @Published private(set) var installing = false
     @Published private(set) var releaseURL: URL?
     @Published private(set) var autoCheck: Bool
     typealias Fetch = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
     private let defaults: UserDefaults
     private let fetch: Fetch
     private let currentVersion: String
+    private let installUpdate: (UpdateAsset, @escaping (String) -> Void, @escaping (String) -> Void) -> Void
     private var timer: Timer?
+    private var recoveredInstall = false
 
-    init(defaults: UserDefaults = .standard, currentVersion: String? = nil, fetch: @escaping Fetch = { request, done in URLSession.shared.dataTask(with: request, completionHandler: done).resume() }) {
+    init(
+        defaults: UserDefaults = .standard,
+        currentVersion: String? = nil,
+        fetch: @escaping Fetch = { request, done in URLSession.shared.dataTask(with: request, completionHandler: done).resume() },
+        installUpdate: @escaping (UpdateAsset, @escaping (String) -> Void, @escaping (String) -> Void) -> Void = UpdateInstaller.install
+    ) {
         self.defaults = defaults
         self.fetch = fetch
+        self.installUpdate = installUpdate
         self.currentVersion = currentVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0")
         self.autoCheck = defaults.object(forKey: "rium.update.autoCheck") as? Bool ?? true
         if let cached = defaults.data(forKey: "rium.update.cachedRelease") {
             let result = Self.parse(cached, current: self.currentVersion)
             if result.1 != nil { self.status = result.0; self.releaseURL = result.1 }
         }
+        if let failure = defaults.string(forKey: UpdateInstaller.failureKey) {
+            status = failure
+            recoveredInstall = true
+            defaults.removeObject(forKey: UpdateInstaller.failureKey)
+        }
     }
     func start() {
-        if autoCheck { checkIfDue() }
+        if autoCheck && !recoveredInstall { checkIfDue() }
         timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             guard let self = self, self.autoCheck else { return }
             self.checkIfDue()
@@ -45,8 +58,8 @@ final class UpdateController: ObservableObject {
     static func isDue(last: Double, now: Double) -> Bool {
         !last.isFinite || last <= 0 || last > now || now - last >= 86400
     }
-    func check() {
-        guard !checking else { return }
+    func check(install: Bool = false) {
+        guard !checking, !installing else { return }
         checking = true
         status = "업데이트 확인 중…"
         var request = URLRequest(url: Self.api, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
@@ -84,6 +97,22 @@ final class UpdateController: ObservableObject {
                 self.defaults.set(cached, forKey: "rium.update.cachedRelease")
                 self.defaults.set(Date().timeIntervalSince1970, forKey: "rium.update.lastCheck")
                 self.defaults.set(self.currentVersion, forKey: "rium.update.lastCheckedAppVersion")
+                guard let local = Self.version(self.currentVersion), let remote = Self.version(tag),
+                      local.lexicographicallyPrecedes(remote) else { return }
+                guard let asset = UpdateAsset(release: json, tag: tag) else {
+                    if install { self.status = "\(tag) · 서명·공증된 업데이트 파일이 아직 없습니다." }
+                    return
+                }
+                if install {
+                    self.installing = true
+                    self.status = "\(tag) 다운로드 중…"
+                    self.installUpdate(asset, { [weak self] message in
+                        self?.status = message
+                    }, { [weak self] failure in
+                        self?.installing = false
+                        self?.status = failure
+                    })
+                }
             }
         }
     }
@@ -98,7 +127,7 @@ final class UpdateController: ObservableObject {
               parts.port == nil, parts.query == nil, parts.fragment == nil,
               parts.path == releasePrefix + tag else { return ("릴리스 정보를 읽을 수 없습니다.", nil) }
         if remote.lexicographicallyPrecedes(local) || remote == local { return ("최신 릴리스: \(tag)", url) }
-        return ("새 릴리스: \(tag) · 릴리스 페이지에서 내용을 확인하세요.", url)
+        return ("새 릴리스: \(tag)", url)
     }
     static func version(_ raw: String) -> [Int]? {
         let text = raw.hasPrefix("v") ? String(raw.dropFirst()) : raw

@@ -22,6 +22,10 @@ bundle="$PWD/build/.rium-stage-$$"
 destination="${RIUM_APP_DESTINATION:-${PWD:h}/Rium Notch.app}"
 previous="$PWD/build/.rium-previous-$$"
 signing_identity="${RIUM_SIGNING_IDENTITY:--}"
+signing_options=()
+if [[ "$signing_identity" == "Developer ID Application:"* || -n "${RIUM_NOTARY_PROFILE:-}" ]]; then
+    signing_options=(--options runtime --timestamp)
+fi
 cleanup() {
     if [[ ! -e "$destination" && -e "$previous" ]]; then mv "$previous" "$destination"; fi
     if [[ -d "$bundle" ]]; then rm -rf "$bundle"; fi
@@ -39,7 +43,7 @@ if xcrun --find metal >/dev/null 2>&1 && xcrun --find metallib >/dev/null 2>&1; 
 else
     print -u2 "Metal 컴파일러가 없어 밝은 표면 조명에 기본 색 보정을 사용합니다."
 fi
-swiftc -O -target arm64-apple-macosx14.0 mac/main.swift mac/RiumCharacter.swift mac/AssistantConnection.swift mac/AssistantController.swift mac/AssistantPage.swift mac/AgentActivityWatcher.swift mac/MediaActivityWatcher.swift mac/SystemNotificationMonitor.swift mac/NotchLight.swift mac/NotchStyles.swift mac/EdgeWave.swift mac/EdgeWaveMetal.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/ScreenshotCord.swift mac/Dictation.swift mac/VoiceApproval.swift mac/Interview.swift mac/InterviewSystemAudio.swift mac/InterviewDeepgram.swift mac/InterviewCredentials.swift mac/InterviewSuggestions.swift mac/FeedbackSound.swift mac/Teleprompter.swift mac/Notes.swift mac/Power.swift mac/Settings.swift mac/HomeCustomization.swift mac/DashboardHome.swift mac/HomeAtmosphere.swift mac/Updater.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift mac/SystemAudioSpectrum.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -lsqlite3 -framework AppKit -framework SwiftUI -framework CoreText -framework Metal -framework MetalKit -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox -framework ServiceManagement -framework CoreServices -framework UserNotifications -framework ImageIO
+swiftc -O -target arm64-apple-macosx14.0 mac/main.swift mac/RiumCharacter.swift mac/AssistantConnection.swift mac/AssistantController.swift mac/AssistantPage.swift mac/AgentActivityWatcher.swift mac/MediaActivityWatcher.swift mac/SystemNotificationMonitor.swift mac/NotchLight.swift mac/NotchStyles.swift mac/EdgeWave.swift mac/EdgeWaveMetal.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/ScreenshotCord.swift mac/Dictation.swift mac/VoiceApproval.swift mac/Interview.swift mac/InterviewSystemAudio.swift mac/InterviewDeepgram.swift mac/InterviewCredentials.swift mac/InterviewSuggestions.swift mac/FeedbackSound.swift mac/Teleprompter.swift mac/Notes.swift mac/Power.swift mac/Settings.swift mac/HomeCustomization.swift mac/DashboardHome.swift mac/HomeAtmosphere.swift mac/Updater.swift mac/UpdateInstaller.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift mac/SystemAudioSpectrum.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -lsqlite3 -framework AppKit -framework SwiftUI -framework CoreText -framework Metal -framework MetalKit -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox -framework ServiceManagement -framework CoreServices -framework UserNotifications -framework ImageIO
 cp core/target/release/rium-notch-core "$bundle/Contents/MacOS/rium-notch-core"
 cp resources/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
 # Local reference artwork is optional and intentionally excluded from Git.
@@ -84,8 +88,11 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_version" "$bundle/Contents/Info.plist"
 xcrun strip -x "$bundle/Contents/MacOS/RiumNotch"
-codesign --force --sign "$signing_identity" "$bundle/Contents/MacOS/rium-notch-core"
-codesign --force --sign "$signing_identity" "$bundle"
+if [[ "$signing_identity" != "-" ]]; then
+    codesign --force "${signing_options[@]}" --sign "$signing_identity" "$bundle/Contents/Resources/mediaremote-adapter/MediaRemoteAdapter.framework"
+fi
+codesign --force "${signing_options[@]}" --sign "$signing_identity" "$bundle/Contents/MacOS/rium-notch-core"
+codesign --force "${signing_options[@]}" --sign "$signing_identity" "$bundle"
 codesign --verify --deep --strict "$bundle"
 if ps -axo comm= | rg -F -- "$destination/Contents/MacOS/" >/dev/null; then
     print -u2 "Rium Notch가 실행 중입니다. 종료한 다음 다시 빌드해 주세요."
