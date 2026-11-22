@@ -50,16 +50,12 @@ fi
 swiftc -O -target arm64-apple-macosx14.0 -F "$sparkle_sdk" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks mac/main.swift mac/RiumCharacter.swift mac/AssistantConnection.swift mac/AssistantController.swift mac/AssistantPage.swift mac/AgentActivityWatcher.swift mac/MediaActivityWatcher.swift mac/SystemNotificationMonitor.swift mac/NotchLight.swift mac/NotchStyles.swift mac/EdgeWave.swift mac/EdgeWaveMetal.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/ScreenshotCord.swift mac/Dictation.swift mac/VoiceApproval.swift mac/Interview.swift mac/InterviewSystemAudio.swift mac/InterviewDeepgram.swift mac/InterviewCredentials.swift mac/InterviewSuggestions.swift mac/FeedbackSound.swift mac/Teleprompter.swift mac/Notes.swift mac/Power.swift mac/Settings.swift mac/HomeCustomization.swift mac/DashboardHome.swift mac/HomeAtmosphere.swift mac/Updater.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift mac/SystemAudioSpectrum.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -lsqlite3 -framework AppKit -framework SwiftUI -framework CoreText -framework Metal -framework MetalKit -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox -framework ServiceManagement -framework CoreServices -framework UserNotifications -framework ImageIO
 cp core/target/release/rium-notch-core "$bundle/Contents/MacOS/rium-notch-core"
 cp resources/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
-# Local reference artwork is optional and intentionally excluded from Git.
-for artwork in resources/appearance/weather-art-*.png(N); do
-    cp "$artwork" "$bundle/Contents/Resources/"
-done
-for photograph in resources/appearance/sky-*.jpg(N); do
-    cp "$photograph" "$bundle/Contents/Resources/"
-done
-for photograph in resources/appearance/hour-*.jpg(N); do
-    cp "$photograph" "$bundle/Contents/Resources/"
-done
+# Local reference artwork is outside the public distribution.
+if [[ "${RIUM_INCLUDE_LOCAL_ARTWORK:-1}" == 1 ]]; then
+    for artwork in resources/appearance/{weather-art-*.png,sky-*.jpg,hour-*.jpg}(N); do
+        cp "$artwork" "$bundle/Contents/Resources/"
+    done
+fi
 cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/Contents/Resources/"
 mkdir -p "$bundle/Contents/Resources/mediaremote-adapter"
 cp resources/vendor/mediaremote-adapter/bin/mediaremote-adapter.pl "$bundle/Contents/Resources/mediaremote-adapter/"

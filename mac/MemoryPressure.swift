@@ -49,19 +49,25 @@ struct CompactMonitorBadge: View {
     var body: some View {
         let ramHeadroom = (model.memoryHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
         let cpuHeadroom = (model.cpuHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
-        let stroke = StrokeStyle(lineWidth: diameter * 0.076, lineCap: .round)
-        let arcInset = diameter * 0.06
+        let strokeWidth = diameter * 0.085
+        let dotDiameter = diameter * 0.113
+        let outerMargin = diameter * 0.01
+        let stroke = StrokeStyle(lineWidth: strokeWidth, lineCap: .round)
+        let arcInset = outerMargin + strokeWidth / 2
         let center = diameter / 2
-        let arcRadius = center - arcInset
+        let dotTrackRadius = center - outerMargin - dotDiameter / 2
+        // Compensate for the round stroke cap so its visible gap matches the dot spacing.
+        let arcStartDegrees = 147.68
+        let arcFraction = (540 - 2 * arcStartDegrees) / 360
         let quotaText = model.monitorCodexRemaining.map(String.init) ?? "—"
         ZStack {
             ZStack {
-                Circle().trim(from: 0, to: 0.68).stroke(arcTint.opacity(0.22), style: stroke)
+                Circle().trim(from: 0, to: arcFraction).stroke(arcTint.opacity(0.22), style: stroke)
                 if ramHeadroom > 0 {
-                    Circle().trim(from: 0, to: 0.68 * CGFloat(ramHeadroom)).stroke(arcTint, style: stroke)
+                    Circle().trim(from: 0, to: arcFraction * CGFloat(ramHeadroom)).stroke(arcTint, style: stroke)
                 }
             }
-            .rotationEffect(.degrees(148))
+            .rotationEffect(.degrees(arcStartDegrees))
             .padding(arcInset)
             Canvas { context, size in
                 let fontSize = size.height * 0.38
@@ -83,11 +89,11 @@ struct CompactMonitorBadge: View {
                 }
             }
             ForEach(0..<4) { index in
-                let angle = (129 - 26 * Double(index)) * .pi / 180
+                let angle = (126 - 24 * Double(index)) * .pi / 180
                 let fill = min(1, max(0, cpuHeadroom * 4 - Double(index)))
                 Circle().fill(.white.opacity(0.22 + fill * 0.78))
-                    .frame(width: diameter * 0.10, height: diameter * 0.10)
-                    .position(x: center + arcRadius * cos(angle), y: center + arcRadius * sin(angle))
+                    .frame(width: dotDiameter, height: dotDiameter)
+                    .position(x: center + dotTrackRadius * cos(angle), y: center + dotTrackRadius * sin(angle))
             }
         }
         .frame(width: diameter, height: diameter)

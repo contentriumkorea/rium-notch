@@ -1615,6 +1615,7 @@ final class Model: ObservableObject {
                 lastCollapse = ProcessInfo.processInfo.systemUptime
                 agentActionHoldUntil = 0
                 setClipboardSearchEditing(false)
+                setWeatherCityEditing(false)
                 setNotesEditing(false)
                 clipboardHistoryDestination = nil
                 presentDeferredRunningPeek()
@@ -2265,6 +2266,9 @@ final class Model: ObservableObject {
     })
     @Published var weatherText = "도시를 선택해 주세요"
     @Published private(set) var weatherShowingStatus = true
+    @Published private(set) var weatherRequestMessage: String?
+    @Published private(set) var weatherSelectionInProgress = false
+    @Published private(set) var weatherCityEditing = false
     @Published var weatherDetail = "날씨 제공: MET Norway"
     @Published private(set) var weatherLocationUncertain = false
     @Published var weatherCity = ""
@@ -2287,7 +2291,7 @@ final class Model: ObservableObject {
     @Published private(set) var assistantEditing = false
     @Published private(set) var promptEditing = false
     @Published private(set) var clipboardSearchEditing = false
-    var onClipboardSearchKeyChange: ((Bool) -> Void)?
+    var onNotchTextKeyChange: ((Bool) -> Void)?
     @Published var now = Date()
     private var observedDayStart = Calendar.current.startOfDay(for: Date())
     private var observedTimeZone = TimeZone.current.identifier
@@ -2297,7 +2301,6 @@ final class Model: ObservableObject {
     private var weatherGeocodeTimeout: DispatchWorkItem?
     private let weatherLocator = WeatherLocation()
     private var weatherGeneration = 0
-    private var weatherSelectionInProgress = false
     private var lastWeatherAttempt = Date.distantPast
     private var timer: Timer?
     private var accountTimer: Timer?
@@ -3039,11 +3042,12 @@ final class Model: ObservableObject {
         if suspended {
             hoverWork?.cancel(); hoverWork = nil
             setClipboardSearchEditing(false)
+            setWeatherCityEditing(false)
             clipboardPasteGeneration &+= 1
             clipboardHistoryDestination = nil
         }
     }
-    private var hoverEditingBlocksCollapse: Bool { tabEditing || notesEditing || promptEditing || assistantEditing || clipboardSearchEditing }
+    private var hoverEditingBlocksCollapse: Bool { tabEditing || notesEditing || promptEditing || assistantEditing || clipboardSearchEditing || weatherCityEditing }
 
     fileprivate func holdExpandedNotchAfterAgentAction() {
         guard expanded else { return }
@@ -3347,6 +3351,7 @@ final class Model: ObservableObject {
         if next != .notes { setNotesEditing(false) }
         if next != .teleprompter { setPromptEditing(false) }
         if next != .assistant { setAssistantEditing(false) }
+        if next != .weather { setWeatherCityEditing(false) }
         if next == .clipboard && section != .clipboard && expanded { rememberClipboardDestination() }
         if next != .clipboard {
             setClipboardSearchEditing(false)
@@ -3377,11 +3382,19 @@ final class Model: ObservableObject {
               editing != clipboardSearchEditing else { return }
         clipboardSearchEditing = editing
         hoverWork?.cancel(); hoverWork = nil
-        onClipboardSearchKeyChange?(editing)
+        onNotchTextKeyChange?(editing)
         if !editing && expanded {
             let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
             handleHover(inside)
         }
+    }
+
+    func setWeatherCityEditing(_ editing: Bool) {
+        guard !editing || (expanded && section == .weather && !hoverSuspended && notchScreenAvailable),
+              editing != weatherCityEditing else { return }
+        weatherCityEditing = editing
+        hoverWork?.cancel(); hoverWork = nil
+        onNotchTextKeyChange?(editing)
     }
 
     func setAssistantEditing(_ editing: Bool) {
@@ -5251,7 +5264,7 @@ final class Model: ObservableObject {
         geocoder.cancelGeocode()
     }
 
-    private func scheduleWeatherGeocodeTimeout(generation: Int, action: @escaping () -> Void) {
+    private func scheduleWeatherGeocodeTimeout(generation: Int, after delay: TimeInterval = 20, action: @escaping () -> Void) {
         weatherGeocodeTimeout?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, weatherGeocodeTimeoutApplies(expected: generation, current: self.weatherGeneration,
@@ -5262,33 +5275,35 @@ final class Model: ObservableObject {
             action()
         }
         weatherGeocodeTimeout = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    func chooseWeatherCity() {
-        let alert = NSAlert(); alert.messageText = "날씨 도시 선택"
-        alert.informativeText = "도시 이름으로 날씨를 조회합니다. 선택한 도시의 좌표가 MET Norway에 전송됩니다."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24)); field.placeholderString = "예: 서울"
-        alert.accessoryView = field; alert.addButton(withTitle: "조회"); alert.addButton(withTitle: "취소")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let city = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    func cancelWeatherSelection() {
+        guard weatherSelectionInProgress else { return }
+        weatherGeneration += 1
+        weatherLocator.cancel(); cancelWeatherGeocode()
+        weatherSelectionInProgress = false
+        weatherRequestMessage = nil
+    }
+
+    func chooseWeatherCity(_ input: String) {
+        let city = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !city.isEmpty else { return }
+        setWeatherCityEditing(false)
         clearWeatherPeek()
         weatherGeneration += 1; let geocodeGeneration = weatherGeneration
         weatherLocator.cancel(); cancelWeatherGeocode()
         weatherSelectionInProgress = true
-        weatherShowingStatus = true
-        weatherText = "도시 확인 중…"
+        weatherRequestMessage = "도시 확인 중…"
         scheduleWeatherGeocodeTimeout(generation: geocodeGeneration) { [weak self] in
             self?.weatherSelectionInProgress = false
-            self?.weatherText = "도시 검색 시간이 초과됐습니다"
+            self?.weatherRequestMessage = "도시 검색 시간이 초과됐습니다"
         }
         geocoder.geocodeAddressString(city) { [weak self] places, error in
             guard let self = self, self.weatherGeneration == geocodeGeneration else { return }
             self.weatherGeocodeTimeout?.cancel(); self.weatherGeocodeTimeout = nil
             guard error == nil, let place = places?.first, let coordinate = place.location?.coordinate else {
-                self.weatherSelectionInProgress = false; self.weatherText = "도시를 찾을 수 없습니다"; return
+                self.weatherSelectionInProgress = false; self.weatherRequestMessage = "도시를 찾을 수 없습니다"; return
             }
             let roundedLat = (coordinate.latitude * 10000).rounded() / 10000
             let roundedLon = (coordinate.longitude * 10000).rounded() / 10000
@@ -5297,28 +5312,31 @@ final class Model: ObservableObject {
     }
 
     func useCurrentWeatherLocation(background: Bool = false) {
+        if !background { setWeatherCityEditing(false) }
         clearWeatherPeek()
         weatherGeneration += 1; let generation = weatherGeneration
         weatherSelectionInProgress = true
         cancelWeatherGeocode(); lastWeatherAttempt = Date()
-        if !background {
-            weatherShowingStatus = true
-            weatherText = "현재 위치 확인 중…"
-        }
+        if !background { weatherRequestMessage = "현재 위치 확인 중…" }
         weatherLocator.request(allowAuthorizationPrompt: !background) { [weak self] result in
             guard let self = self, self.weatherGeneration == generation else { return }
             switch result {
-            case .failure(let error): self.weatherSelectionInProgress = false; self.showWeatherLocationFailure(error.message)
+            case .failure(let error):
+                self.weatherSelectionInProgress = false
+                self.showWeatherLocationFailure(error.message, background: background)
             case .success(let location):
                 let coordinate = location.coordinate
                 guard CLLocationCoordinate2DIsValid(coordinate) else {
-                    self.weatherSelectionInProgress = false; self.showWeatherLocationFailure("현재 위치를 확인하지 못했습니다"); return
+                    self.weatherSelectionInProgress = false
+                    self.showWeatherLocationFailure("현재 위치를 확인하지 못했습니다", background: background)
+                    return
                 }
                 let lat = (coordinate.latitude * 10_000).rounded() / 10_000
                 let lon = (coordinate.longitude * 10_000).rounded() / 10_000
-                if !background { self.weatherText = "현재 위치의 날씨 확인 중…" }
-                self.scheduleWeatherGeocodeTimeout(generation: generation) { [weak self] in
-                    self?.fetchWeather(city: "현재 위치", lat: lat, lon: lon, currentLocation: true, background: background)
+                if !background { self.weatherRequestMessage = "현재 위치의 날씨 확인 중…" }
+                self.scheduleWeatherGeocodeTimeout(generation: generation, after: 4) { [weak self] in
+                    self?.fetchWeather(city: "현재 위치", lat: lat, lon: lon, timeZoneID: TimeZone.current.identifier,
+                                       currentLocation: true, background: background)
                 }
                 self.geocoder.reverseGeocodeLocation(location) { [weak self] places, _ in
                     guard let self = self, self.weatherGeneration == generation else { return }
@@ -5331,13 +5349,11 @@ final class Model: ObservableObject {
         }
     }
 
-    private func showWeatherLocationFailure(_ message: String) {
+    private func showWeatherLocationFailure(_ message: String, background: Bool) {
+        if !background { weatherRequestMessage = message }
         let defaults = UserDefaults.standard
         guard let previous = previousCurrentLocationWeather(cache: defaults.dictionary(forKey: "rium.weather.cache"),
-                                                             wasCurrent: defaults.bool(forKey: "rium.weather.currentLocation")) else {
-            weatherText = message
-            return
-        }
+                                                             wasCurrent: defaults.bool(forKey: "rium.weather.currentLocation")) else { return }
         showWeather(city: "\(previous.city) (마지막 위치)", data: previous.data, updated: previous.updated,
                     timeZoneID: previous.timeZoneID, locationUncertain: true)
         weatherDetail += " · \(message)"
@@ -5346,7 +5362,7 @@ final class Model: ObservableObject {
     func refreshStaleWeather() {
         let now = Date()
         // A failed manual selection must not be replaced by the previous city.
-        guard !weatherShowingStatus, let cache = UserDefaults.standard.dictionary(forKey: "rium.weather.cache"),
+        guard !weatherShowingStatus, weatherRequestMessage == nil, let cache = UserDefaults.standard.dictionary(forKey: "rium.weather.cache"),
               let updated = cache["updated"] as? Double,
               weatherMayAutoRefresh(inProgress: weatherSelectionInProgress, sinceAttempt: now.timeIntervalSince(lastWeatherAttempt), cacheAge: now.timeIntervalSince1970 - updated),
               let lat = cache["lat"] as? Double, let lon = cache["lon"] as? Double,
@@ -5371,13 +5387,11 @@ final class Model: ObservableObject {
             defaults.set(updatedCache, forKey: "rium.weather.cache")
             if let currentLocation = currentLocation { defaults.set(currentLocation, forKey: "rium.weather.currentLocation") }
             weatherSelectionInProgress = false
+            weatherRequestMessage = nil
             showWeather(city: city, data: data, updated: Date(timeIntervalSince1970: updated), timeZoneID: timeZoneID ?? (cache["timezone"] as? String)); return
         }
         lastWeatherAttempt = Date()
-        if !background {
-            weatherShowingStatus = true
-            weatherText = "날씨 조회 중…"
-        }
+        if !background { weatherRequestMessage = "날씨 조회 중…" }
         run(["weather", String(lat), String(lon)], timeout: 20) { [weak self] event in
             guard let self = self, self.weatherGeneration == generation else { return }
             guard let kind = event["event"] as? String, kind == "result" || kind == "error" else { return }
@@ -5399,17 +5413,19 @@ final class Model: ObservableObject {
                 if let id = timeZoneID, TimeZone(identifier: id) != nil { entry["timezone"] = id }
                 defaults.set(entry, forKey: "rium.weather.cache")
                 if let currentLocation = currentLocation { defaults.set(currentLocation, forKey: "rium.weather.currentLocation") }
+                self.weatherRequestMessage = nil
                 self.showWeather(city: city, data: safeData, timeZoneID: timeZoneID)
             } else {
                 let error = event["message"] as? String ?? "날씨를 읽을 수 없습니다"
+                if !background { self.weatherRequestMessage = error }
                 if let cache = defaults.dictionary(forKey: "rium.weather.cache"), let oldLat = cache["lat"] as? Double,
                    let oldLon = cache["lon"] as? Double, oldLat == lat, oldLon == lon,
                    let updated = cache["updated"] as? Double, let data = cache["data"] as? [String: Any] {
                     self.showWeather(city: city, data: data, updated: Date(timeIntervalSince1970: updated), timeZoneID: cache["timezone"] as? String)
                     self.weatherDetail += " · 연결 실패"
-                } else if background && currentLocation == true {
-                    self.showWeatherLocationFailure(error)
-                } else { self.weatherText = error }
+                } else if currentLocation == true {
+                    self.showWeatherLocationFailure(error, background: background)
+                }
             }
         }
     }
@@ -10030,6 +10046,8 @@ func detailWeatherForecast(_ hours: [WeatherHour], now: Date) -> [WeatherHour] {
 // shortcut: glass colors, proportions, and photo treatment await reference-frame comparison.
 struct WeatherView: View {
     @ObservedObject var main: Model
+    @State private var city = ""
+    @FocusState private var cityFocused: Bool
     init(model: Model) { self.main = model }
     var body: some View {
         let forecast = main.weatherShowingStatus ? [] : detailWeatherForecast(main.weatherForecast, now: main.now)
@@ -10037,9 +10055,43 @@ struct WeatherView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("날씨").font(.system(size: 14, weight: .semibold))
-                Spacer(); Button("현재 위치") { main.useCurrentWeatherLocation() }.buttonStyle(.plain).help("현재 위치 좌표를 날씨 제공처에 전송합니다")
-                Button("도시 선택") { main.chooseWeatherCity() }.buttonStyle(.plain)
+                Spacer()
+                Button("현재 위치") { main.useCurrentWeatherLocation() }
+                    .buttonStyle(.plain).help("현재 위치 좌표를 MET Norway에 전송합니다")
+                Button("도시 선택") { main.setWeatherCityEditing(true) }.buttonStyle(.plain)
             }.font(.system(size: 11))
+            if main.weatherCityEditing {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        TextField("도시 이름", text: $city, prompt: Text("예: 서울"))
+                            .textFieldStyle(.roundedBorder)
+                            .focused($cityFocused)
+                            .onSubmit { main.chooseWeatherCity(city) }
+                            .onExitCommand { main.setWeatherCityEditing(false) }
+                        Button("조회") { main.chooseWeatherCity(city) }
+                            .disabled(city.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("입력 취소") { main.setWeatherCityEditing(false) }
+                    }
+                    Text("선택한 도시의 좌표를 MET Norway에 전송합니다.").font(.caption2).foregroundStyle(.secondary)
+                }
+                .onAppear { cityFocused = true }
+            }
+            if let message = main.weatherRequestMessage {
+                HStack(spacing: 6) {
+                    if main.weatherSelectionInProgress { ProgressView().controlSize(.small) }
+                    Text(message).lineLimit(2)
+                    Spacer()
+                    if main.weatherSelectionInProgress {
+                        Button("조회 취소") { main.cancelWeatherSelection() }.buttonStyle(.plain)
+                    } else if message == WeatherLocation.permissionRequiredMessage {
+                        Button("위치 서비스 설정") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }.buttonStyle(.plain)
+                    }
+                }.font(.caption)
+            }
             if main.weatherShowingStatus {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(main.weatherText).font(.headline)
@@ -10301,7 +10353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top))
         hosting.sizingOptions = []
         panel.contentView = hosting
-        model.onClipboardSearchKeyChange = { [weak panel = panel] editing in
+        model.onNotchTextKeyChange = { [weak panel = panel] editing in
             if editing { panel?.makeKey() }
             else if panel?.isKeyWindow == true { panel?.resignKey() }
         }
@@ -10312,6 +10364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuTrackingObservers.append(notifications.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
             self?.closeAgentSwitcher(restoreFocus: false)
             self?.model.setClipboardSearchEditing(false)
+            self?.model.setWeatherCityEditing(false)
         })
         menuTrackingObservers.append(notifications.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
@@ -11343,6 +11396,20 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     precondition(weatherModel.weatherLocationUncertain && weatherModel.weatherPrecipitationWindow == nil)
     weatherModel.showWeather(city: "서울", data: ["temperature": 12.0])
     precondition(!weatherModel.weatherLocationUncertain)
+    weatherModel.expanded = true
+    weatherModel.select(.weather)
+    weatherModel.setWeatherCityEditing(true)
+    weatherModel.handleHover(false)
+    precondition(weatherModel.expanded && weatherModel.weatherCityEditing)
+    weatherModel.chooseWeatherCity("  ")
+    precondition(weatherModel.weatherCityEditing && !weatherModel.weatherSelectionInProgress)
+    weatherModel.chooseWeatherCity("서울")
+    precondition(!weatherModel.weatherCityEditing && weatherModel.weatherSelectionInProgress)
+    precondition(weatherModel.weatherRequestMessage == "도시 확인 중…" && !weatherModel.weatherShowingStatus && weatherModel.weatherCity == "서울")
+    weatherModel.select(.monitor)
+    precondition(weatherModel.section == .monitor)
+    weatherModel.cancelWeatherSelection()
+    precondition(!weatherModel.weatherSelectionInProgress && weatherModel.weatherRequestMessage == nil && !weatherModel.weatherShowingStatus)
     weatherModel.showWeather(city: "다른 도시", data: [:])
     precondition(weatherModel.weatherShowingStatus && weatherModel.weatherText == "날씨를 읽을 수 없습니다")
     let hourRows: [[String: Any]] = [
@@ -11550,7 +11617,7 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     model.autoHideEnabled = true
     model.autoHideDelay = 0.08
     var keyRequests: [Bool] = []
-    model.onClipboardSearchKeyChange = { keyRequests.append($0) }
+    model.onNotchTextKeyChange = { keyRequests.append($0) }
     model.select(.clipboard)
     model.setClipboardSearchEditing(true)
     precondition(keyRequests.isEmpty, "a folded notch requested search focus")

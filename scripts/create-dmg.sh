@@ -14,7 +14,7 @@ if [[ -n "$notary_profile" && "${RIUM_SIGNING_IDENTITY:--}" == "-" ]]; then
 fi
 stage="$(mktemp -d "${TMPDIR:-/tmp}/rium-notch-package.XXXXXXXX")"
 trap 'rm -rf "$stage"' EXIT
-RIUM_APP_DESTINATION="$stage/Rium Notch.app" zsh build.sh
+RIUM_INCLUDE_LOCAL_ARTWORK=0 RIUM_APP_DESTINATION="$stage/Rium Notch.app" zsh build.sh
 if [[ -n "$notary_profile" ]]; then
     ditto -c -k --keepParent "$stage/Rium Notch.app" "$stage/notary.zip"
     xcrun notarytool submit "$stage/notary.zip" --keychain-profile "$notary_profile" --wait
