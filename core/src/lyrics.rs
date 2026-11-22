@@ -2,6 +2,68 @@
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::ffi::{c_char, CString};
+
+fn lrc_timestamp(value: &str) -> Option<f64> {
+    let (minutes, seconds) = value.split_once(':')?;
+    if !(1..=3).contains(&minutes.len()) || !minutes.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    let (whole, fraction) = match seconds.split_once('.') { Some((whole, fraction)) => (whole, Some(fraction)), None => (seconds, None) };
+    if whole.len() != 2 || !whole.bytes().all(|b| b.is_ascii_digit())
+        || fraction.is_some_and(|part| part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit())) { return None; }
+    let seconds: f64 = seconds.parse().ok()?;
+    if seconds >= 60.0 { return None; }
+    Some(minutes.parse::<f64>().ok()? * 60.0 + seconds)
+}
+
+/// Timed lyrics preserve duplicate timestamps in source order; blank timed
+/// lines are retained because they mark instrumental gaps.
+fn parse_lines(synced: &str, plain: &str) -> Vec<Value> {
+    let mut timed = Vec::<(f64, String)>::new();
+    let mut expanded_bytes = 0usize;
+    for line in synced.split(['\r', '\n', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}']) {
+        let mut remaining = line;
+        let mut timestamps = Vec::new();
+        while let Some(rest) = remaining.strip_prefix('[') {
+            let Some(end) = rest.find(']') else { break; };
+            let Some(time) = lrc_timestamp(&rest[..end]) else { break; };
+            timestamps.push(time);
+            remaining = &rest[end + 1..];
+        }
+        let text = remaining.trim();
+        for time in timestamps {
+            expanded_bytes = expanded_bytes.saturating_add(text.len());
+            if timed.len() >= 20_000 || expanded_bytes > 2_000_000 { return Vec::new(); }
+            timed.push((time, text.to_owned()));
+        }
+    }
+    if timed.iter().any(|(_, text)| !text.is_empty()) {
+        timed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        return timed.into_iter().enumerate().map(|(id, (time, text))| json!({"id":id,"time":time,"text":text})).collect();
+    }
+    plain.split(['\r', '\n', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}']).map(str::trim).filter(|line| !line.is_empty())
+        .enumerate().map(|(id, text)| json!({"id":id,"time":null,"text":text})).collect()
+}
+
+/// The buffers must remain valid for their declared lengths during this call.
+/// Returns an owned UTF-8 JSON string, released with `rium_lyrics_free`.
+#[no_mangle]
+pub unsafe extern "C" fn rium_lyrics_parse(synced: *const u8, synced_len: usize, plain: *const u8, plain_len: usize) -> *mut c_char {
+    unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+        if len == 0 { return Some(""); }
+        if ptr.is_null() || len > 150_000 { return None; }
+        std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
+    }
+    let Some(synced) = bytes(synced, synced_len) else { return std::ptr::null_mut(); };
+    let Some(plain) = bytes(plain, plain_len) else { return std::ptr::null_mut(); };
+    match CString::new(Value::Array(parse_lines(synced, plain)).to_string()) {
+        Ok(value) => value.into_raw(), Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rium_lyrics_free(value: *mut c_char) {
+    if !value.is_null() { drop(CString::from_raw(value)); }
+}
 
 fn encoded(value: &str) -> String {
     let mut out = String::new();
@@ -41,6 +103,20 @@ pub fn lookup(title: &str, artist: &str, duration: Option<f64>) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn timed_lines_sort_and_preserve_repeated_times_and_gaps() {
+        let rows = parse_lines("[00:04.20][00:01.00]안녕\n[00:01.00]둘째\n[00:03.00]\n[00:70.00]무효", "대체 가사");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0]["time"], 1.0); assert_eq!(rows[0]["text"], "안녕");
+        assert_eq!(rows[1]["time"], 1.0); assert_eq!(rows[1]["text"], "둘째");
+        assert_eq!(rows[2]["time"], 3.0); assert_eq!(rows[2]["text"], "");
+        assert_eq!(rows[3]["time"], 4.2);
+        assert_eq!(parse_lines("[00:01.00]", "한 줄\r\n두 줄"), json!([
+            {"id":0,"time":null,"text":"한 줄"}, {"id":1,"time":null,"text":"두 줄"}
+        ]).as_array().unwrap().clone());
+        assert!(lrc_timestamp("12:60.0").is_none());
+        assert!(lrc_timestamp("1:01.1234").is_none());
+    }
     #[test]
     fn encodes_metadata_and_filters_response() {
         assert_eq!(encoded("a &한"), "a%20%26%ED%95%9C");

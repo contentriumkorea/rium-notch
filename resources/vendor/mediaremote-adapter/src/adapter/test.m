@@ -86,13 +86,97 @@ void handleSignal(int signal) {
 
 extern void adapter_test(void) {
     @autoreleasepool {
+        NSDictionary *fallback = @{@"playing": @YES, @"elapsedTime": @10, @"duration": @100,
+                                   @"timestamp": [NSDate dateWithTimeIntervalSince1970:100]};
+        NSCAssert([fallbackElapsedNow(fallback, 105) doubleValue] == 15, @"missing-rate estimate failed");
+        NSMutableDictionary *invalid = [fallback mutableCopy];
+        invalid[@"playbackRate"] = @2;
+        NSCAssert(fallbackElapsedNow(invalid, 105) == nil, @"explicit rate must not be replaced");
+        [invalid removeObjectForKey:@"playbackRate"]; invalid[@"playing"] = @NO;
+        NSCAssert(fallbackElapsedNow(invalid, 105) == nil, @"paused time must not be advanced");
+        NSCAssert(fallbackElapsedNow(fallback, 99) == nil && [fallbackElapsedNow(fallback, 191) doubleValue] == 100,
+                  @"future anchor or track end handled incorrectly");
+        NSMutableDictionary *paused = [@{@"playing": @NO, @"elapsedTime": @10, @"elapsedTimeNow": @25,
+                                          @"playbackRate": @1} mutableCopy];
+        normalizeElapsedNow(paused, NO, 105);
+        NSCAssert([paused[@"elapsedTimeNow"] doubleValue] == 10, @"paused position advanced with stale rate");
+        NSMutableDictionary *pausedMicros = [@{@"playing": @NO, @"elapsedTimeMicros": @10000000,
+                                                @"elapsedTimeNowMicros": @25000000} mutableCopy];
+        normalizeElapsedNow(pausedMicros, YES, 105);
+        NSCAssert([pausedMicros[@"elapsedTimeNowMicros"] longLongValue] == 10000000, @"paused microsecond position advanced");
+        NSMutableDictionary *running = [fallback mutableCopy];
+        normalizeElapsedNow(running, NO, 105);
+        NSCAssert([running[@"elapsedTimeNow"] doubleValue] == 15, @"playing fallback was not retained");
+        running[@"playbackRate"] = @2; running[@"elapsedTimeNow"] = @12;
+        normalizeElapsedNow(running, NO, 105);
+        NSCAssert([running[@"elapsedTimeNow"] doubleValue] == 20, @"elapsed time was not refreshed with explicit playback rate");
+        normalizeElapsedNow(running, NO, 200);
+        NSCAssert([running[@"elapsedTimeNow"] doubleValue] == 100, @"projected playback time exceeded duration");
+        running[@"playbackRate"] = @0; normalizeElapsedNow(running, NO, 110);
+        NSCAssert([running[@"elapsedTimeNow"] doubleValue] == 10, @"zero playback rate advanced");
+        running[@"playbackRate"] = @(-1); running[@"elapsedTimeNow"] = @11;
+        normalizeElapsedNow(running, NO, 110);
+        NSCAssert([running[@"elapsedTimeNow"] doubleValue] == 0, @"reverse playback did not stop at zero");
+        running[@"playbackRate"] = @(-17); normalizeElapsedNow(running, NO, 110);
+        NSCAssert(running[@"elapsedTimeNow"] == nil && [running[@"elapsedTime"] doubleValue] == 10, @"invalid playback rate retained an estimate");
+        running[@"playbackRate"] = @2; running[@"elapsedTimeNow"] = @11; normalizeElapsedNow(running, NO, 99);
+        NSCAssert(running[@"elapsedTimeNow"] == nil, @"future playback anchor retained an estimate");
+        running[@"playbackRate"] = @17; running[@"elapsedTimeNow"] = @11; normalizeElapsedNow(running, NO, 105);
+        NSCAssert(running[@"elapsedTimeNow"] == nil, @"unsupported playback rate retained an estimate");
+        [running removeObjectForKey:@"playbackRate"]; running[@"elapsedTimeNow"] = @11; normalizeElapsedNow(running, NO, 99);
+        NSCAssert(running[@"elapsedTimeNow"] == nil, @"future fallback anchor retained an estimate");
+        NSMutableDictionary *stream = [fallback mutableCopy];
+        [stream removeObjectForKey:@"duration"];
+        normalizeElapsedNow(stream, NO, 105);
+        NSCAssert([stream[@"elapsedTimeNow"] doubleValue] == 15, @"missing-duration fallback did not advance");
+        stream[@"playbackRate"] = @2; normalizeElapsedNow(stream, NO, 105);
+        NSCAssert([stream[@"elapsedTimeNow"] doubleValue] == 20, @"missing-duration explicit rate did not advance");
+        stream[@"duration"] = @0; stream[@"playbackRate"] = @(-1); normalizeElapsedNow(stream, NO, 120);
+        NSCAssert([stream[@"elapsedTimeNow"] doubleValue] == 0, @"unbounded reverse time fell below zero");
+        stream[@"duration"] = @(-1); normalizeElapsedNow(stream, NO, 105);
+        NSCAssert(stream[@"elapsedTimeNow"] == nil, @"invalid duration retained an estimate");
+        NSMutableDictionary *streamMicros = [@{@"playing": @YES, @"playbackRate": @2,
+             @"elapsedTimeMicros": @10000000, @"timestampEpochMicros": @100000000} mutableCopy];
+        normalizeElapsedNow(streamMicros, YES, 105);
+        NSCAssert([streamMicros[@"elapsedTimeNowMicros"] longLongValue] == 20000000, @"missing-duration microseconds failed");
+        NSMutableDictionary *runningMicros = [@{@"playing": @YES, @"playbackRate": @2,
+             @"elapsedTimeMicros": @10000000, @"durationMicros": @100000000,
+             @"timestampEpochMicros": @100000000, @"elapsedTimeNowMicros": @11000000} mutableCopy];
+        normalizeElapsedNow(runningMicros, YES, 105);
+        NSCAssert([runningMicros[@"elapsedTimeNowMicros"] longLongValue] == 20000000, @"microsecond playback position was not refreshed");
+        [runningMicros removeObjectForKey:@"playbackRate"]; normalizeElapsedNow(runningMicros, YES, 105);
+        NSCAssert([runningMicros[@"elapsedTimeNowMicros"] longLongValue] == 15000000, @"microsecond missing-rate fallback failed");
+        normalizeElapsedNow(runningMicros, YES, 99);
+        NSCAssert(runningMicros[@"elapsedTimeNowMicros"] == nil, @"future microsecond anchor retained an estimate");
+        NSMutableDictionary *artwork = [@{@"title": @"Track", @"elapsedTime": @12,
+                                           @"artworkData": [NSMutableData dataWithLength:1000000],
+                                           @"artworkMimeType": @"image/jpeg"} mutableCopy];
+        limitArtwork(artwork);
+        NSCAssert(artwork[@"artworkData"] != nil, @"bounded artwork was discarded");
+        NSData *tinyPNG = [[NSData alloc] initWithBase64EncodedString:@"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII=" options:0];
+        NSMutableData *largePNG = [tinyPNG mutableCopy];
+        [largePNG setLength:1000001];
+        artwork[@"artworkData"] = largePNG;
+        limitArtwork(artwork);
+        NSCAssert([artwork[@"artworkData"] length] > 0 && [artwork[@"artworkData"] length] <= 1000000 &&
+                  [artwork[@"artworkMimeType"] isEqual:@"image/png"], @"large artwork was not resized");
+        artwork[@"artworkData"] = [largePNG base64EncodedStringWithOptions:0];
+        limitArtwork(artwork);
+        NSCAssert([artwork[@"artworkData"] isKindOfClass:[NSData class]] &&
+                  [artwork[@"artworkData"] length] > 0 && [artwork[@"artworkData"] length] <= 1000000,
+                  @"large encoded artwork was not resized");
+        artwork[@"artworkData"] = [NSMutableData dataWithLength:1000001];
+        limitArtwork(artwork);
+        NSCAssert(artwork[@"artworkData"] == nil && artwork[@"artworkMimeType"] == nil &&
+                  [artwork[@"elapsedTime"] intValue] == 12 && [artwork[@"title"] isEqual:@"Track"],
+                  @"oversized artwork must not discard playback metadata");
         signal(SIGINT, handleSignal);
         signal(SIGTERM, handleSignal);
         signal(SIGPIPE, SIG_IGN);
 
         // If adapterOutput is not null, we know the adapter is working
         // correctly
-        NSDictionary *result = internal_get(YES);
+        NSDictionary *result = internal_get(YES, NULL);
         if (result != nil) {
             cleanup_helper();
             exit(0);
@@ -205,7 +289,7 @@ extern void adapter_test(void) {
         // first call to adapter_get slows down MediaRemote?
         [NSThread sleepForTimeInterval:0.01];
 
-        result = internal_get(YES);
+        result = internal_get(YES, NULL);
         if (result != nil) {
             cleanup_helper();
             exit(0);

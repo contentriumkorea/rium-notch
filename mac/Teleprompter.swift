@@ -1,10 +1,13 @@
 import AppKit
+import SwiftUI
 
 @_silgen_name("rium_teleprompter_save") private func promptSave(_ root: UnsafePointer<CChar>, _ data: UnsafeRawPointer?, _ length: Int) -> Int32
 @_silgen_name("rium_teleprompter_load") private func promptLoad(_ root: UnsafePointer<CChar>, _ length: UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
 @_silgen_name("rium_teleprompter_free") private func promptFree(_ data: UnsafeMutablePointer<UInt8>?, _ length: Int)
 @_silgen_name("rium_teleprompter_chapters") private func promptChapterJSON(_ data: UnsafeRawPointer?, _ length: Int) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("rium_teleprompter_free_string") private func promptFreeString(_ data: UnsafeMutablePointer<CChar>?)
+@_silgen_name("rium_teleprompter_wheel_delta") private func promptWheelDelta(_ vertical: Double, _ precise: Int32) -> Double
+@_silgen_name("rium_teleprompter_scroll_position") private func promptScrollPosition(_ offset: Double, _ shift: Double, _ limit: Double) -> Double
 
 private struct PromptChapter: Decodable { let title: String; let offset: Int }
 private func promptChapters(_ text: String) -> [PromptChapter] {
@@ -28,12 +31,29 @@ func promptSearchRange(_ text: String, query: String, selected: NSRange, backwar
     return wrapped.location == NSNotFound ? nil : wrapped
 }
 
-final class TeleprompterController: NSObject, NSWindowDelegate, NSTextViewDelegate {
+private final class TeleprompterScrollView: NSScrollView {
+    var onReadingWheel: ((NSEvent) -> Bool)?
+
+    override func scrollWheel(with event: NSEvent) {
+        if onReadingWheel?(event) == true { return }
+        super.scrollWheel(with: event)
+    }
+}
+
+final class TeleprompterController: NSObject, ObservableObject, NSWindowDelegate, NSTextViewDelegate {
+    @Published private(set) var isDetached = false
+    var onEditingChange: ((Bool) -> Void)?
     private var window: NSWindow?
+    private var editorRoot: NSView?
     private var scrollView: NSScrollView?
     private var textView: NSTextView?
     private var timer: Timer?
     private var playButton: NSButton?
+    private var editButton: NSButton?
+    private var rewindButton: NSButton?
+    private var readingOffset = 0.0
+    private var playbackSpeed = 30.0
+    private var lastPlaybackTick: TimeInterval?
     private var speedSlider: NSSlider?
     private var fontSlider: NSSlider?
     private var fontLabel: NSTextField?
@@ -93,6 +113,8 @@ final class TeleprompterController: NSObject, NSWindowDelegate, NSTextViewDelega
         saveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
+    func textDidBeginEditing(_ notification: Notification) { onEditingChange?(true) }
+    func textDidEndEditing(_ notification: Notification) { onEditingChange?(false) }
     private func scheduleChapters(_ text: String) {
         chapterGeneration += 1; let generation = chapterGeneration
         chapterWork?.cancel()
@@ -120,13 +142,14 @@ final class TeleprompterController: NSObject, NSWindowDelegate, NSTextViewDelega
         reportSave(result, revision: current)
     }
 
-    func show() {
-        if let window = window { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+    private func prepare() {
+        if window != nil { return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Rium Notch 프롬프터"; window.center(); window.level = .floating; window.delegate = self
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 400, height: 240)
         let rootView = NSView(); rootView.translatesAutoresizingMaskIntoConstraints = false; window.contentView = rootView
-        let scroll = NSScrollView(); scroll.translatesAutoresizingMaskIntoConstraints = false; scroll.hasVerticalScroller = true; scroll.drawsBackground = true; scroll.backgroundColor = .black
+        let scroll = TeleprompterScrollView(); scroll.translatesAutoresizingMaskIntoConstraints = false; scroll.hasVerticalScroller = true; scroll.drawsBackground = true; scroll.backgroundColor = .black
+        scroll.onReadingWheel = { [weak self] event in self?.handleReadingWheel(event) ?? false }
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 680, height: 330)); text.isRichText = false; text.isEditable = true
         text.backgroundColor = .black; text.textColor = .white; text.insertionPointColor = .white
         text.font = .systemFont(ofSize: setting("rium.prompt.fontSize", range: 18...72, defaultValue: 30))
@@ -134,13 +157,17 @@ final class TeleprompterController: NSObject, NSWindowDelegate, NSTextViewDelega
         text.textContainer?.widthTracksTextView = true; scroll.documentView = text
         let stored = loadScript(); canSave = stored != nil; text.string = stored ?? ""; text.delegate = self
         let play = NSButton(title: "스크롤 시작", target: self, action: #selector(toggle))
+        play.setAccessibilityIdentifier("teleprompter-play")
+        let edit = NSButton(title: "원고 편집", target: self, action: #selector(editScript)); edit.isHidden = true
+        let rewind = NSButton(title: "처음으로", target: self, action: #selector(rewindScript)); rewind.isHidden = true
         let speed = NSSlider(value: setting("rium.prompt.speed", range: 5...120, defaultValue: 30), minValue: 5, maxValue: 120, target: self, action: #selector(changeSpeed))
+        playbackSpeed = speed.doubleValue
         speed.setAccessibilityLabel("스크롤 속도")
         let size = NSSlider(value: setting("rium.prompt.fontSize", range: 18...72, defaultValue: 30), minValue: 18, maxValue: 72, target: self, action: #selector(changeFontSize))
         size.setAccessibilityLabel("글자 크기")
         speed.widthAnchor.constraint(equalToConstant: 80).isActive = true; size.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let fontLabel = NSTextField(labelWithString: "글자 \(Int(size.doubleValue))")
-        let toolbar = NSStackView(views: [play, NSTextField(labelWithString: "속도"), speed, fontLabel, size]); toolbar.orientation = .horizontal; toolbar.spacing = 8; toolbar.translatesAutoresizingMaskIntoConstraints = false
+        let toolbar = NSStackView(views: [play, edit, rewind, NSTextField(labelWithString: "속도"), speed, fontLabel, size]); toolbar.orientation = .horizontal; toolbar.spacing = 8; toolbar.translatesAutoresizingMaskIntoConstraints = false
         let search = NSSearchField(); search.placeholderString = "원고 검색"; search.setAccessibilityLabel("원고 검색"); search.target = self; search.action = #selector(findNext)
         search.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         search.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
@@ -162,39 +189,151 @@ final class TeleprompterController: NSObject, NSWindowDelegate, NSTextViewDelega
             status.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 12), status.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -7),
             searchStatus.leadingAnchor.constraint(greaterThanOrEqualTo: status.trailingAnchor, constant: 8), searchStatus.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -12), searchStatus.centerYAnchor.constraint(equalTo: status.centerYAnchor)
         ])
-        self.window = window; self.scrollView = scroll; self.textView = text; self.playButton = play; self.speedSlider = speed; self.fontSlider = size; self.fontLabel = fontLabel; self.statusLabel = status
+        self.window = window; self.editorRoot = rootView; self.scrollView = scroll; self.textView = text; self.playButton = play; self.speedSlider = speed; self.fontSlider = size; self.fontLabel = fontLabel; self.statusLabel = status
+        editButton = edit; rewindButton = rewind
         self.searchField = search; self.searchStatus = searchStatus; self.chaptersButton = chapters; scheduleChapters(text.string)
+    }
+    func attach(to container: NSView) {
+        prepare()
+        guard !isDetached, let root = editorRoot, root.superview !== container else { return }
+        if window?.contentView === root { window?.contentView = NSView() }
+        root.removeFromSuperview()
+        root.translatesAutoresizingMaskIntoConstraints = true
+        root.frame = container.bounds
+        root.autoresizingMask = [.width, .height]
+        container.addSubview(root)
+    }
+    func show() {
+        prepare()
+        guard let window = window, let root = editorRoot else { return }
+        if window.contentView !== root {
+            root.removeFromSuperview()
+            root.translatesAutoresizingMaskIntoConstraints = true
+            window.contentView = root
+        }
+        isDetached = true
+        onEditingChange?(false)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    @objc private func changeSpeed() { if let value = speedSlider?.doubleValue { preferences.set(value, forKey: "rium.prompt.speed") } }
+    func returnToNotch() { window?.close() }
+    @objc private func changeSpeed() {
+        guard let value = speedSlider?.doubleValue else { return }
+        if timer != nil { advance(at: ProcessInfo.processInfo.systemUptime) }
+        playbackSpeed = value
+        preferences.set(value, forKey: "rium.prompt.speed")
+    }
     @objc private func findNext() { find(backwards: false) }
     @objc private func findPrevious() { find(backwards: true) }
     private func find(backwards: Bool) {
         guard let textView = textView, let query = searchField?.stringValue, !query.isEmpty else { searchStatus?.stringValue = "검색어를 입력하세요"; return }
         guard let found = promptSearchRange(textView.string, query: query, selected: textView.selectedRange(), backwards: backwards) else { searchStatus?.stringValue = "검색 결과가 없습니다"; return }
         textView.setSelectedRange(found); textView.scrollRangeToVisible(found); searchStatus?.stringValue = "검색 결과로 이동"
+        reanchorReadingOffset()
     }
     @objc private func jumpToChapter() {
         guard let offset = chaptersButton?.selectedItem?.representedObject as? NSNumber, let textView = textView else { return }
         let location = min(max(0, offset.intValue), (textView.string as NSString).length)
         let range = NSRange(location: location, length: 0); textView.setSelectedRange(range); textView.scrollRangeToVisible(range)
+        reanchorReadingOffset()
     }
     @objc private func changeFontSize() {
         guard let value = fontSlider?.doubleValue else { return }
         textView?.font = .systemFont(ofSize: value); fontLabel?.stringValue = "글자 \(Int(value))"
         preferences.set(value, forKey: "rium.prompt.fontSize")
     }
+    private var isReading: Bool { textView?.isEditable == false }
+
+    private func reanchorReadingOffset() {
+        guard isReading, let clip = scrollView?.contentView else { return }
+        readingOffset = Double(clip.bounds.origin.y)
+        if lastPlaybackTick != nil { lastPlaybackTick = ProcessInfo.processInfo.systemUptime }
+    }
+
+    private func advance(at uptime: TimeInterval, nudge: Double = 0) {
+        guard let scroll = scrollView, let content = scroll.documentView else { return }
+        let clip = scroll.contentView
+        let limit = max(0, Double(content.bounds.height - clip.bounds.height))
+        let automatic = lastPlaybackTick.map { max(0, uptime - $0) * playbackSpeed } ?? 0
+        if lastPlaybackTick != nil { lastPlaybackTick = uptime }
+        readingOffset = promptScrollPosition(readingOffset, automatic + nudge, limit)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: CGFloat(readingOffset)))
+        scroll.reflectScrolledClipView(clip)
+        if readingOffset >= limit && timer != nil { stop() }
+    }
+
+    private func handleReadingWheel(_ event: NSEvent) -> Bool {
+        guard isReading else { return false }
+        let nudge = promptWheelDelta(Double(event.scrollingDeltaY), event.hasPreciseScrollingDeltas ? 1 : 0)
+        advance(at: ProcessInfo.processInfo.systemUptime, nudge: nudge)
+        return true
+    }
+
     @objc private func toggle() {
-        if timer != nil { stop(); return }
-        playButton?.title = "스크롤 정지"
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self = self, let scroll = self.scrollView, let content = scroll.documentView else { return }
-            let clip = scroll.contentView, limit = max(0, content.bounds.height - clip.bounds.height)
-            let next = min(limit, clip.bounds.origin.y + CGFloat(self.speedSlider?.doubleValue ?? 30) * 0.05)
-            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: next)); scroll.reflectScrolledClipView(clip)
-            if next >= limit { self.stop() }
+        let now = ProcessInfo.processInfo.systemUptime
+        if timer != nil { advance(at: now); stop(); return }
+        guard let textView else { return }
+        if !isReading {
+            flush()
+            textView.isEditable = false
+            editButton?.isHidden = false; rewindButton?.isHidden = false
+            onEditingChange?(false)
+            reanchorReadingOffset()
+        }
+        lastPlaybackTick = now
+        playButton?.title = "일시 정지"
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.advance(at: ProcessInfo.processInfo.systemUptime)
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func rewindScript() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if lastPlaybackTick != nil { lastPlaybackTick = now }
+        advance(at: now, nudge: -readingOffset)
+    }
+
+    @objc private func editScript() {
+        textView?.isEditable = true
+        editButton?.isHidden = true; rewindButton?.isHidden = true
+        stop()
+    }
+
+    private func stop() {
+        timer?.invalidate(); timer = nil; lastPlaybackTick = nil
+        playButton?.title = isReading ? "스크롤 계속" : "스크롤 시작"
+    }
+    func windowWillClose(_ notification: Notification) { stop(); flush(); isDetached = false; onEditingChange?(false) }
+}
+
+private struct TeleprompterEmbedded: NSViewRepresentable {
+    let controller: TeleprompterController
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        controller.attach(to: container)
+        return container
+    }
+    func updateNSView(_ view: NSView, context: Context) { controller.attach(to: view) }
+}
+
+// shortcut: layout and the detached transition await comparison with the reference.
+struct TeleprompterPage: View {
+    @ObservedObject var controller: TeleprompterController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("프롬프터").font(.system(size: 15, weight: .semibold))
+                Spacer()
+                if controller.isDetached { Button("노치로 돌아오기") { controller.returnToNotch() } }
+                else { Button("별도 창") { controller.show() } }
+            }.buttonStyle(.plain)
+            if controller.isDetached {
+                Text("프롬프터가 별도 창에서 열려 있습니다.").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                TeleprompterEmbedded(controller: controller).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
-    private func stop() { timer?.invalidate(); timer = nil; playButton?.title = "스크롤 시작" }
-    func windowWillClose(_ notification: Notification) { stop(); flush() }
 }

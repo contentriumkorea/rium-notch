@@ -6,6 +6,24 @@ use std::time::Duration;
 extern "C" { fn clock_gettime_nsec_np(clock_id: i32) -> u64; }
 fn now() -> Duration { Duration::from_nanos(unsafe { clock_gettime_nsec_np(4) }) }
 
+const ALARM_SOUND_SECONDS: f64 = 30.0;
+
+#[no_mangle]
+pub extern "C" fn rium_timer_alarm_sound_seconds() -> f64 {
+    ALARM_SOUND_SECONDS
+}
+
+#[no_mangle]
+pub extern "C" fn rium_timer_alarm_preview_seconds() -> f64 {
+    ALARM_SOUND_SECONDS + 1.0
+}
+
+#[no_mangle]
+pub extern "C" fn rium_timer_alarm_fraction(elapsed: f64) -> f64 {
+    if !elapsed.is_finite() || elapsed < 0.0 { return 0.0; }
+    (1.0 - elapsed / ALARM_SOUND_SECONDS).max(0.0)
+}
+
 #[derive(Default)]
 struct Countdown {
     remaining: Duration,
@@ -17,9 +35,9 @@ impl Countdown {
     fn remaining_at(&self, now: Duration) -> Duration {
         self.deadline.map(|deadline| deadline.saturating_sub(now)).unwrap_or(self.remaining)
     }
-    fn start(&mut self, seconds: u32, now: Duration) {
-        self.remaining = Duration::from_secs(seconds.into());
-        self.started = seconds > 0;
+    fn start(&mut self, remaining: Duration, now: Duration) {
+        self.remaining = remaining;
+        self.started = !remaining.is_zero();
         self.deadline = if self.started { now.checked_add(self.remaining) } else { None };
     }
     fn pause(&mut self, now: Duration) {
@@ -31,31 +49,58 @@ impl Countdown {
             self.deadline = now.checked_add(self.remaining);
         }
     }
+    // Return whether an already-running countdown was extended.
+    fn extend(&mut self, seconds: u32, now: Duration) -> Option<bool> {
+        if seconds == 0 || seconds > 86_400 { return None; }
+        let running = self.status(now).0 == 1;
+        let remaining = if running { self.remaining_at(now) } else { Duration::ZERO };
+        let next = remaining.checked_add(Duration::from_secs(seconds.into()))?;
+        if next > Duration::from_secs(86_400) { return None; }
+        let deadline = now.checked_add(next)?;
+        self.remaining = next;
+        self.deadline = Some(deadline);
+        self.started = true;
+        Some(running)
+    }
     fn status(&self, now: Duration) -> (i32, u64) {
         let remaining = self.remaining_at(now);
         let rounded = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
         let state = if !self.started { 0 } else if remaining.is_zero() { 3 } else if self.deadline.is_some() { 1 } else { 2 };
         (state, rounded)
     }
+    fn overdue_at(&self, now: Duration) -> Duration {
+        self.deadline.map_or(Duration::ZERO, |deadline| now.saturating_sub(deadline))
+    }
 }
 
 static TIMER: Mutex<Countdown> = Mutex::new(Countdown { remaining: Duration::ZERO, deadline: None, started: false });
 
 #[no_mangle]
-pub extern "C" fn rium_timer_start(seconds: u32) { TIMER.lock().unwrap_or_else(|e| e.into_inner()).start(seconds, now()); }
+pub extern "C" fn rium_timer_start(seconds: u32) { TIMER.lock().unwrap_or_else(|e| e.into_inner()).start(Duration::from_secs(seconds.into()), now()); }
 #[no_mangle]
 pub extern "C" fn rium_timer_pause() { TIMER.lock().unwrap_or_else(|e| e.into_inner()).pause(now()); }
 #[no_mangle]
 pub extern "C" fn rium_timer_resume() { TIMER.lock().unwrap_or_else(|e| e.into_inner()).resume(now()); }
 #[no_mangle]
 pub extern "C" fn rium_timer_reset() { *TIMER.lock().unwrap_or_else(|e| e.into_inner()) = Countdown::default(); }
+/// Extend a running timer or start a new one. Returns 1, 0, or -1 on invalid input.
+#[no_mangle]
+pub extern "C" fn rium_timer_extend(seconds: u32) -> i32 {
+    match TIMER.lock().unwrap_or_else(|e| e.into_inner()).extend(seconds, now()) {
+        Some(true) => 1,
+        Some(false) => 0,
+        None => -1,
+    }
+}
 /// Restore a validated checkpoint. 1 running, 2 paused, 3 complete.
 #[no_mangle]
-pub extern "C" fn rium_timer_restore(state: i32, seconds: u32) -> i32 {
-    if !(1..=3).contains(&state) || seconds > 86_400 || (state != 3 && seconds == 0) { return -1; }
+pub extern "C" fn rium_timer_restore(state: i32, seconds: f64) -> i32 {
+    if !(1..=3).contains(&state) || seconds > 86_400.0 { return -1; }
+    let Ok(remaining) = Duration::try_from_secs_f64(seconds) else { return -1; };
+    if state != 3 && remaining.is_zero() { return -1; }
     let mut timer = TIMER.lock().unwrap_or_else(|e| e.into_inner());
     if state == 3 { *timer = Countdown { remaining: Duration::ZERO, deadline: None, started: true }; }
-    else { let current = now(); timer.start(seconds, current); if state == 2 { timer.pause(current); } }
+    else { let current = now(); timer.start(remaining, current); if state == 2 { timer.pause(current); } }
     0
 }
 /// 0 idle, 1 running, 2 paused, 3 complete. Null output returns -1.
@@ -65,6 +110,76 @@ pub unsafe extern "C" fn rium_timer_status(seconds: *mut u64) -> i32 {
     let (status, remaining) = TIMER.lock().unwrap_or_else(|e| e.into_inner()).status(now());
     *seconds = remaining;
     status
+}
+
+/// Exact remaining seconds for a running timer; zero when it cannot be scheduled.
+#[no_mangle]
+pub extern "C" fn rium_timer_running_seconds() -> f64 {
+    let timer = TIMER.lock().unwrap_or_else(|e| e.into_inner());
+    timer.deadline.map_or(0.0, |deadline| deadline.saturating_sub(now()).as_secs_f64())
+}
+
+/// Exact remaining time for a running or paused checkpoint.
+#[no_mangle]
+pub extern "C" fn rium_timer_remaining_seconds() -> f64 {
+    TIMER.lock().unwrap_or_else(|e| e.into_inner()).remaining_at(now()).as_secs_f64()
+}
+
+/// Time elapsed past the deadline on the countdown's sleep-inclusive clock.
+#[no_mangle]
+pub extern "C" fn rium_timer_overdue_seconds() -> f64 {
+    TIMER.lock().unwrap_or_else(|e| e.into_inner()).overdue_at(now()).as_secs_f64()
+}
+
+#[no_mangle]
+pub extern "C" fn rium_timer_fraction(remaining: u64, total: u64) -> f64 {
+    if total == 0 { return -1.0; }
+    remaining.min(total) as f64 / total as f64
+}
+
+/// The reference calendar countdown rounds minutes upward and fills the ring
+/// during the final hour before the event begins.
+pub fn event_countdown(seconds: f64) -> Option<(i64, f64)> {
+    if !seconds.is_finite() || seconds.abs() > 31_536_000.0 { return None; }
+    let minutes = (seconds / 60.0).ceil() as i64;
+    let progress = (1.0 - minutes as f64 / 60.0).clamp(0.0, 1.0);
+    Some((minutes, progress))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rium_event_countdown(seconds: f64, minutes: *mut i64, progress: *mut f64) -> i32 {
+    if minutes.is_null() || progress.is_null() { return -1; }
+    let Some((m, p)) = event_countdown(seconds) else { return -1; };
+    *minutes = m;
+    *progress = p;
+    0
+}
+
+/// Clock hand rotations in turns from twelve o'clock.
+pub fn clock_hand_turns(hour: i32, minute: i32, second: f64) -> Option<[f64; 3]> {
+    if !(0..24).contains(&hour) || !(0..60).contains(&minute) || !(0.0..60.0).contains(&second) { return None; }
+    let second_turn = second / 60.0;
+    let minute_turn = (f64::from(minute) + second_turn) / 60.0;
+    let hour_turn = (f64::from(hour % 12) + minute_turn) / 12.0;
+    Some([hour_turn, minute_turn, second_turn])
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rium_clock_hand_turns(hour: i32, minute: i32, second: f64, output: *mut f64) -> i32 {
+    if output.is_null() { return -1; }
+    let Some(turns) = clock_hand_turns(hour, minute, second) else { return -1; };
+    for (index, value) in turns.into_iter().enumerate() { *output.add(index) = value; }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rium_home_dial_interval(active: i32, reduce_motion: i32, low_power: i32) -> f64 {
+    match (active != 0, reduce_motion != 0, low_power != 0) {
+        (false, _, _) => 0.0,
+        (true, true, _) => 60.0,
+        (true, false, true) => 1.0,
+        (true, false, false) => 1.0 / 30.0,
+    }
 }
 
 // Glance's observed defaults: 25-minute focus, 5-minute short break,
@@ -121,18 +236,79 @@ pub unsafe extern "C" fn rium_pomodoro_advance_config(phase: i32, completed: u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alarm_gauge_drains_while_sound_rings() {
+        assert_eq!(rium_timer_alarm_sound_seconds(), 30.0);
+        assert_eq!(rium_timer_alarm_preview_seconds(), 31.0);
+        assert_eq!(rium_timer_alarm_fraction(0.0), 1.0);
+        assert_eq!(rium_timer_alarm_fraction(15.0), 0.5);
+        assert!(rium_timer_alarm_fraction(29.999) > 0.0);
+        for elapsed in [30.0, 31.0, -0.1, f64::NAN, f64::INFINITY] {
+            assert_eq!(rium_timer_alarm_fraction(elapsed), 0.0);
+        }
+    }
+    #[test]
+    fn clock_hands_follow_minutes_and_seconds() {
+        assert_eq!(clock_hand_turns(12, 0, 0.0), Some([0.0, 0.0, 0.0]));
+        let hands = clock_hand_turns(3, 30, 30.0).unwrap();
+        assert!((hands[0] - (3.0 + 30.5 / 60.0) / 12.0).abs() < 1e-9);
+        assert!((hands[1] - 30.5 / 60.0).abs() < 1e-9);
+        assert_eq!(hands[2], 0.5);
+        let between = clock_hand_turns(3, 30, 30.5).unwrap();
+        assert!(between.into_iter().zip(hands).all(|(a, b)| a > b));
+        assert!((between[2] - 30.5 / 60.0).abs() < 1e-9);
+        assert!(clock_hand_turns(24, 0, 0.0).is_none());
+        assert!(clock_hand_turns(1, 60, 0.0).is_none());
+        assert!(clock_hand_turns(1, 0, 60.0).is_none());
+        assert!(clock_hand_turns(1, 0, f64::NAN).is_none());
+    }
+    #[test]
+    fn home_dial_interval_prioritizes_visibility_and_motion() {
+        assert_eq!(rium_home_dial_interval(0, 0, 0), 0.0);
+        assert_eq!(rium_home_dial_interval(0, 1, 1), 0.0);
+        assert_eq!(rium_home_dial_interval(1, 1, 0), 60.0);
+        assert_eq!(rium_home_dial_interval(1, 1, 1), 60.0);
+        assert_eq!(rium_home_dial_interval(1, 0, 1), 1.0);
+        assert_eq!(rium_home_dial_interval(1, 0, 0), 1.0 / 30.0);
+    }
+    #[test]
+    fn event_countdown_rounds_minutes_and_bounds_the_ring() {
+        assert_eq!(event_countdown(3601.0), Some((61, 0.0)));
+        assert_eq!(event_countdown(1800.0), Some((30, 0.5)));
+        assert_eq!(event_countdown(0.1).unwrap().0, 1);
+        assert_eq!(event_countdown(-60.0), Some((-1, 1.0)));
+        assert!(event_countdown(f64::NAN).is_none());
+    }
     #[test]
     fn countdown_survives_pause_and_finishes_without_underflow() {
         let now = Duration::from_secs(100); let mut timer = Countdown::default();
-        timer.start(60, now);
+        timer.start(Duration::from_secs(60), now);
         assert_eq!(timer.status(now + Duration::from_secs(20)), (1, 40));
+        assert_eq!(timer.overdue_at(now + Duration::from_secs(20)), Duration::ZERO);
         timer.pause(now + Duration::from_secs(20));
         assert_eq!(timer.status(now + Duration::from_secs(100)), (2, 40));
         timer.resume(now + Duration::from_secs(100));
         assert_eq!(timer.status(now + Duration::from_secs(141)), (3, 0));
+        assert_eq!(timer.overdue_at(now + Duration::from_millis(140_750)), Duration::from_millis(750));
         timer.pause(now + Duration::from_secs(150));
+        assert_eq!(timer.overdue_at(now + Duration::from_secs(151)), Duration::ZERO);
         timer.resume(now + Duration::from_secs(151));
         assert_eq!(timer.status(now + Duration::from_secs(152)), (3, 0));
+    }
+    #[test]
+    fn extend_preserves_a_running_deadline_and_starts_from_other_states() {
+        let now = Duration::from_secs(100);
+        let mut timer = Countdown::default();
+        assert_eq!(timer.extend(60, now), Some(false));
+        assert_eq!(timer.extend(300, now + Duration::from_secs(20)), Some(true));
+        assert_eq!(timer.status(now + Duration::from_secs(20)), (1, 340));
+        timer.pause(now + Duration::from_secs(30));
+        assert_eq!(timer.extend(60, now + Duration::from_secs(40)), Some(false));
+        assert_eq!(timer.status(now + Duration::from_secs(40)), (1, 60));
+        assert_eq!(timer.extend(0, now), None);
+        assert_eq!(timer.extend(86_400, now + Duration::from_secs(40)), None);
+        assert_eq!(timer.status(now + Duration::from_secs(40)), (1, 60));
     }
     #[test]
     fn pomodoro_progresses_through_short_and_long_breaks() {

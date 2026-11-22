@@ -2,6 +2,14 @@
 set -euo pipefail
 cd "${0:A:h}"
 export MACOSX_DEPLOYMENT_TARGET=14.0
+# CLT's macOS 27 SDK can omit SwiftUIMacros; keep an explicitly selected SDK.
+if [[ -z "${SDKROOT:-}" ]]; then
+    current_sdk="$(xcrun --show-sdk-path)"
+    fallback_sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+    if [[ "${current_sdk:A}" == /Library/Developer/CommandLineTools/SDKs/MacOSX27*.sdk && -d "$fallback_sdk" ]]; then
+        export SDKROOT="$fallback_sdk"
+    fi
+fi
 app_version="$(< VERSION)"
 if [[ ! "$app_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
     print -u2 "VERSION 형식이 올바르지 않습니다."
@@ -24,9 +32,26 @@ if ps -axo comm= | rg -F -- "$destination/Contents/MacOS/" >/dev/null; then
     exit 1
 fi
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-swiftc -O -target arm64-apple-macosx14.0 mac/main.swift mac/NotchLight.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/Dictation.swift mac/Teleprompter.swift mac/Power.swift mac/Settings.swift mac/HomeCustomization.swift mac/HomeAtmosphere.swift mac/Updater.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -framework AppKit -framework SwiftUI -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ServiceManagement -framework CoreServices -framework UserNotifications
+if xcrun --find metal >/dev/null 2>&1 && xcrun --find metallib >/dev/null 2>&1; then
+    xcrun -sdk macosx metal -c resources/LightSurface.metal -o "$bundle/Contents/Resources/LightSurface.air"
+    xcrun -sdk macosx metallib "$bundle/Contents/Resources/LightSurface.air" -o "$bundle/Contents/Resources/LightSurface.metallib"
+    rm "$bundle/Contents/Resources/LightSurface.air"
+else
+    print -u2 "Metal 컴파일러가 없어 밝은 표면 조명에 기본 색 보정을 사용합니다."
+fi
+swiftc -O -target arm64-apple-macosx14.0 mac/main.swift mac/RiumCharacter.swift mac/AssistantConnection.swift mac/AssistantController.swift mac/AssistantPage.swift mac/AgentActivityWatcher.swift mac/MediaActivityWatcher.swift mac/SystemNotificationMonitor.swift mac/NotchLight.swift mac/NotchStyles.swift mac/EdgeWave.swift mac/EdgeWaveMetal.swift mac/MemoryPressure.swift mac/Agenda.swift mac/AirDropMonitor.swift mac/ScreenshotMonitor.swift mac/ScreenshotCord.swift mac/Dictation.swift mac/VoiceApproval.swift mac/Interview.swift mac/InterviewSystemAudio.swift mac/InterviewDeepgram.swift mac/InterviewCredentials.swift mac/InterviewSuggestions.swift mac/FeedbackSound.swift mac/Teleprompter.swift mac/Notes.swift mac/Power.swift mac/Settings.swift mac/HomeCustomization.swift mac/DashboardHome.swift mac/HomeAtmosphere.swift mac/Updater.swift mac/TimerNotifications.swift mac/WeatherLocation.swift mac/AudioOutput.swift mac/SystemAudioSpectrum.swift core/target/release/librium_notch_core.a -o "$bundle/Contents/MacOS/RiumNotch" -lsqlite3 -framework AppKit -framework SwiftUI -framework CoreText -framework Metal -framework MetalKit -framework Security -framework EventKit -framework CoreLocation -framework UniformTypeIdentifiers -framework AVFoundation -framework Speech -framework ApplicationServices -framework IOKit -framework CoreAudio -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox -framework ServiceManagement -framework CoreServices -framework UserNotifications -framework ImageIO
 cp core/target/release/rium-notch-core "$bundle/Contents/MacOS/rium-notch-core"
 cp resources/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+# Local reference artwork is optional and intentionally excluded from Git.
+for artwork in resources/appearance/weather-art-*.png(N); do
+    cp "$artwork" "$bundle/Contents/Resources/"
+done
+for photograph in resources/appearance/sky-*.jpg(N); do
+    cp "$photograph" "$bundle/Contents/Resources/"
+done
+for photograph in resources/appearance/hour-*.jpg(N); do
+    cp "$photograph" "$bundle/Contents/Resources/"
+done
 cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/Contents/Resources/"
 mkdir -p "$bundle/Contents/Resources/mediaremote-adapter"
 cp resources/vendor/mediaremote-adapter/bin/mediaremote-adapter.pl "$bundle/Contents/Resources/mediaremote-adapter/"
@@ -52,12 +77,13 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>NSDesktopFolderUsageDescription</key><string>스크린샷을 보관함에 표시합니다.</string>
 <key>NSLocationUsageDescription</key><string>현재 위치의 날씨를 표시합니다.</string>
 <key>NSLocationWhenInUseUsageDescription</key><string>현재 위치의 날씨를 표시합니다.</string>
-<key>NSMicrophoneUsageDescription</key><string>설정한 단축키를 누르는 동안 음성을 받아쓰기 위해 마이크를 사용합니다.</string>
+<key>NSMicrophoneUsageDescription</key><string>받아쓰기, AI 음성 입력, 면접 전사와 사용자가 요청한 음성 답변을 위해 마이크를 사용합니다.</string>
 <key>NSSpeechRecognitionUsageDescription</key><string>말씀한 내용을 기기 내 음성 인식으로 텍스트로 변환합니다.</string>
 </dict></plist>
 PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_version" "$bundle/Contents/Info.plist"
+xcrun strip -x "$bundle/Contents/MacOS/RiumNotch"
 codesign --force --sign "$signing_identity" "$bundle/Contents/MacOS/rium-notch-core"
 codesign --force --sign "$signing_identity" "$bundle"
 codesign --verify --deep --strict "$bundle"

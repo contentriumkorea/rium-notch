@@ -6,6 +6,9 @@
 
 #import <Foundation/Foundation.h>
 
-NSDictionary *internal_get(BOOL isTestMode);
+NSDictionary *internal_get(BOOL isTestMode, BOOL *timedOut);
+NSNumber *fallbackElapsedNow(NSDictionary *data, NSTimeInterval now);
+void normalizeElapsedNow(NSMutableDictionary *data, BOOL micros, NSTimeInterval now);
+void limitArtwork(NSMutableDictionary *data);
 
 #endif // MEDIAREMOTEADAPTER_ADAPTER_GET_H

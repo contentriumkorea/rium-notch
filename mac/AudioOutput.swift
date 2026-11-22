@@ -6,12 +6,101 @@ struct AudioOutputDevice: Identifiable {
     let name: String
 }
 
+final class AudioOutputVolumeObserver {
+    private let listener: AudioObjectPropertyListenerBlock
+    private var defaultOutput = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    private var observesDefaultOutput = false
+    private var device: AudioDeviceID = 0
+    private var deviceProperties: [AudioObjectPropertyAddress] = []
+
+    init(onChange: @escaping () -> Void, onPlaybackActivityChange: @escaping () -> Void) {
+        listener = { count, addresses in
+            let changes = Self.changeKinds(UnsafeBufferPointer(start: addresses, count: Int(count)))
+            if changes.volume { onChange() }
+            if changes.playback { onPlaybackActivityChange() }
+        }
+        observesDefaultOutput = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, listener) == noErr
+    }
+
+    static func changeKinds(_ addresses: UnsafeBufferPointer<AudioObjectPropertyAddress>) -> (volume: Bool, playback: Bool) {
+        let volume = addresses.contains { $0.mSelector == kAudioHardwarePropertyDefaultOutputDevice ||
+            $0.mSelector == kAudioDevicePropertyVolumeScalar || $0.mSelector == kAudioDevicePropertyMute }
+        let playback = addresses.contains { $0.mSelector == kAudioHardwarePropertyDefaultOutputDevice ||
+            $0.mSelector == kAudioDevicePropertyDeviceIsRunningSomewhere }
+        return (volume, playback)
+    }
+
+    func observeDevice(_ id: AudioDeviceID) {
+        guard id != device else { return }
+        for var property in deviceProperties {
+            AudioObjectRemovePropertyListenerBlock(device, &property, .main, listener)
+        }
+        deviceProperties.removeAll()
+        device = id
+        guard id != 0 else { return }
+
+        let scope = kAudioDevicePropertyScopeOutput
+        var properties = [
+            AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute, mScope: scope,
+                                       mElement: kAudioObjectPropertyElementMain),
+            AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                       mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        ]
+        for element in AudioObjectPropertyElement(0)...2 {
+            properties.append(AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                                         mScope: scope, mElement: element))
+        }
+        for var property in properties where AudioObjectHasProperty(id, &property) {
+            if AudioObjectAddPropertyListenerBlock(id, &property, .main, listener) == noErr {
+                deviceProperties.append(property)
+            }
+        }
+    }
+
+    deinit {
+        observeDevice(0)
+        if observesDefaultOutput {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, listener)
+        }
+    }
+}
+
 // Reads the system output list locally. The default output is changed only
 // when the user explicitly chooses a device in the music panel.
 final class AudioOutputModel: ObservableObject {
     @Published private(set) var devices: [AudioOutputDevice] = []
     @Published private(set) var current: AudioDeviceID = AudioObjectID(kAudioObjectUnknown)
     @Published private(set) var error = ""
+
+    private var observedProperties: [AudioObjectPropertyAddress] = []
+    private lazy var routeListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        guard let self, !self.observedProperties.isEmpty else { return }
+        self.refresh()
+    }
+
+    func startObserving() {
+        if observedProperties.isEmpty {
+            for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultOutputDevice] {
+                var property = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+                if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &property, .main, routeListener) == noErr {
+                    observedProperties.append(property)
+                }
+            }
+        }
+        refresh()
+    }
+
+    func stopObserving() {
+        for var property in observedProperties {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &property, .main, routeListener)
+        }
+        observedProperties.removeAll()
+    }
+
+    deinit { stopObserving() }
 
     func refresh() {
         var selector = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
@@ -76,6 +165,7 @@ struct AudioOutputMenu: View {
         .menuStyle(.borderlessButton).menuIndicator(.hidden)
         .help(model.error.isEmpty ? "오디오 출력 장치 선택" : model.error)
         .accessibilityLabel("오디오 출력 장치 선택")
-        .onAppear { model.refresh() }
+        .onAppear { model.startObserving() }
+        .onDisappear { model.stopObserving() }
     }
 }

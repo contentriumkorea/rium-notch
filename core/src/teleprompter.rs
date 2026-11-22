@@ -1,4 +1,4 @@
-//! Private, atomic storage for the user's teleprompter script.
+//! Private script storage and teleprompter scroll calculations.
 use std::ffi::{c_char, CStr, CString};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
@@ -8,6 +8,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_SCRIPT: usize = 1_048_576;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
+
+#[no_mangle]
+pub extern "C" fn rium_teleprompter_wheel_delta(vertical: f64, precise: i32) -> f64 {
+    let shift = -vertical * if precise == 1 { 0.8 } else { 6.0 };
+    if shift.is_finite() { shift } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn rium_teleprompter_scroll_position(offset: f64, shift: f64, limit: f64) -> f64 {
+    if !limit.is_finite() || limit < 0.0 {
+        return 0.0;
+    }
+    let offset = if offset.is_finite() { offset.clamp(0.0, limit) } else { 0.0 };
+    let shift = if shift.is_finite() { shift } else { 0.0 };
+    (offset + shift).clamp(0.0, limit)
+}
 
 fn save(root: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > MAX_SCRIPT || std::str::from_utf8(bytes).is_err() {
@@ -99,6 +115,16 @@ pub unsafe extern "C" fn rium_teleprompter_free_string(ptr: *mut c_char) {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn wheel_nudges_match_the_input_units_and_stop_at_script_edges() {
+        assert_eq!(rium_teleprompter_wheel_delta(-10.0, 1), 8.0);
+        assert_eq!(rium_teleprompter_wheel_delta(2.0, 0), -12.0);
+        assert_eq!(rium_teleprompter_wheel_delta(f64::NAN, 1), 0.0);
+        assert_eq!(rium_teleprompter_scroll_position(5.0, -12.0, 200.0), 0.0);
+        assert_eq!(rium_teleprompter_scroll_position(196.0, 8.0, 200.0), 200.0);
+        assert_eq!(rium_teleprompter_scroll_position(2.3, 0.25, 200.0), 2.55);
+    }
     #[test]
     fn saves_privately_without_destroying_previous_on_invalid_write() {
         let root = std::env::temp_dir().join(format!("rium-prompt-test-{}-{}", std::process::id(), NEXT_FILE.fetch_add(1, Ordering::Relaxed)));

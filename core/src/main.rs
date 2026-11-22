@@ -253,7 +253,45 @@ fn remove(id:&str) -> Result<Value,String> {
 }
 fn main() {
     install_shutdown_handler();
+    let raw_args: Vec<_> = env::args_os().collect();
+    if raw_args.get(1).is_some_and(|arg| arg.as_os_str() == std::ffi::OsStr::new("desktop-launcher")) {
+        match rium_notch_core::desktop_launcher::run(&raw_args[2..], &SHUTDOWN) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("Rium Desktop launcher: {error}"); std::process::exit(1); }
+        }
+    }
     let args:Vec<String>=env::args().collect();
+    if args.get(1).map(String::as_str) == Some("assistant-server") {
+        match binary().and_then(|path| rium_notch_core::assistant_transport::run(&path, &SHUTDOWN).map_err(str::to_owned)) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("Rium assistant: {error}"); std::process::exit(1); }
+        }
+    }
+    if args.get(1).map(String::as_str) == Some("desktop-bridge") {
+        let command = if args.get(2).map(String::as_str) == Some("--") { &args[3..] } else { &[] };
+        match rium_notch_core::desktop_transport::run(command, &SHUTDOWN) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("Rium Desktop bridge: {error}"); std::process::exit(1); }
+        }
+    }
+    // Codex hooks must never block an agent or write protocol output. The
+    // integration records metadata only and fails open on any error.
+    if args.get(1).map(String::as_str) == Some("agent-hook") {
+        let _ = rium_notch_core::agent_hook::record(args.get(2).map(String::as_str).unwrap_or(""));
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("claude-hook") {
+        let _ = rium_notch_core::agent_hook::record_claude(args.get(2).map(String::as_str).unwrap_or(""));
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("claude-permission-hook") {
+        let _ = rium_notch_core::agent_hook::claude_permission_hook();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("codex-permission-hook") {
+        let _ = rium_notch_core::agent_hook::codex_permission_hook();
+        return;
+    }
     let result = match args.get(1).map(String::as_str) {
         Some("list") => list(),
         Some("create") => create(args.get(2).map(String::as_str).unwrap_or("")),
@@ -269,7 +307,12 @@ fn main() {
                 _ => Err("날씨 위치가 올바르지 않습니다".into()),
             }
         },
-        Some("media") => rium_notch_core::media::request(args.get(2).map(String::as_str).unwrap_or("get"), args.get(3).map(String::as_str)),
+        Some("media") => {
+            let action = args.get(2).map(String::as_str).unwrap_or("get");
+            let position = args.get(3).map(String::as_str).filter(|arg| !arg.starts_with("--player="));
+            let player = args.iter().skip(3).find_map(|arg| arg.strip_prefix("--player="));
+            rium_notch_core::media::request(action, position, player)
+        }
         Some("lyrics") => {
             let mut input = Vec::new();
             match io::stdin().lock().take(4097).read_to_end(&mut input) {
@@ -281,6 +324,233 @@ fn main() {
             }
         },
         Some("agents") => rium_notch_core::agents::recent(),
+        Some("agents-observed") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(300_001).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 300_000 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(Value::Array(paths)) => match serde_json::from_value::<Vec<String>>(Value::Array(paths)) {
+                        Ok(paths) if paths.len() <= 64 => rium_notch_core::agents::recent_with_observed(&paths),
+                        _ => Err("에이전트 관찰 경로를 읽을 수 없습니다".into()),
+                    },
+                    Ok(Value::Object(object)) => {
+                        let paths = object.get("paths").cloned().and_then(|v| serde_json::from_value::<Vec<String>>(v).ok());
+                        let anchors = object.get("anchors").and_then(Value::as_array);
+                        match (paths, anchors) {
+                            (Some(paths), Some(anchors)) if paths.len() <= 64 && anchors.len() <= 64 => {
+                                let watch_sessions = object.get("watchSessionFiles").and_then(Value::as_bool) == Some(true);
+                                let watch_codex = watch_sessions || object.get("watchCodexFiles").and_then(Value::as_bool) == Some(true);
+                                rium_notch_core::agents::recent_with_anchors(&paths, anchors, watch_codex, watch_sessions)
+                            }
+                            _ => Err("에이전트 관찰 경로를 읽을 수 없습니다".into()),
+                        }
+                    },
+                    _ => Err("에이전트 관찰 경로를 읽을 수 없습니다".into()),
+                },
+                _ => Err("에이전트 관찰 경로를 읽을 수 없습니다".into()),
+            }
+        },
+        Some("agent-hook-install") => rium_notch_core::agent_hook::install(),
+        Some("agent-hook-uninstall") => rium_notch_core::agent_hook::uninstall_codex(),
+        Some("codex-permission-install") => rium_notch_core::agent_hook::install_codex_permission(),
+        Some("claude-hook-install") => rium_notch_core::agent_hook::install_claude(),
+        Some("claude-hook-uninstall") => rium_notch_core::agent_hook::uninstall_claude(),
+        Some("claude-permission-install") => rium_notch_core::agent_hook::install_claude_permission(),
+        Some("desktop-qualify") => {
+            match (args.get(2), args.get(3)) {
+                (Some(binary), Some(info)) => rium_notch_core::desktop_qualification::qualify(Path::new(binary), Path::new(info), &SHUTDOWN)
+                    .map_err(str::to_owned),
+                _ => Err("확인할 Codex 앱과 실행 파일을 지정해 주세요".into()),
+            }
+        },
+        Some("desktop-enable") => match args.get(2) {
+            Some(app) => rium_notch_core::desktop_activation::enable(Path::new(app), &SHUTDOWN).map_err(str::to_owned),
+            None => Err("Codex 앱을 찾을 수 없습니다".into()),
+        },
+        Some("desktop-disable") => rium_notch_core::desktop_activation::disable(&SHUTDOWN).map_err(str::to_owned),
+        Some("desktop-status") => rium_notch_core::desktop_activation::status(&SHUTDOWN).map_err(str::to_owned),
+        Some("desktop-restore") => match (args.get(2), args.get(3)) {
+            (Some(receipt), Some(launcher)) => rium_notch_core::desktop_activation::restore(Path::new(receipt), Path::new(launcher), &SHUTDOWN).map_err(str::to_owned),
+            _ => Err("Codex 연동 경로를 확인할 수 없습니다".into()),
+        },
+        Some("desktop-native-list") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::desktop_client::previews(value["sessionId"].as_str().unwrap_or("")),
+                    Err(_) => Err("Desktop 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("Desktop 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("desktop-native-list-strict") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::desktop_client::strict_previews(value["sessionId"].as_str().unwrap_or("")),
+                    Err(_) => Err("Desktop 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("Desktop 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("voice-approval-submit") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::voice_approval::submit(
+                        value["sessionId"].as_str().unwrap_or(""), value["channel"].as_str().unwrap_or(""),
+                        &value["shown"], value["decision"].as_str().unwrap_or("")),
+                    Err(_) => Err("음성 승인 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("음성 승인 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("desktop-native-answer") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::desktop_client::respond(
+                        value["sessionId"].as_str().unwrap_or(""), value["connection"].as_str().unwrap_or(""),
+                        value["workspace"].as_str().unwrap_or(""), &value["shown"],
+                        value["action"].as_str().unwrap_or(""), &value["answer"]),
+                    Err(_) => Err("Desktop 응답을 읽을 수 없습니다".into()),
+                },
+                _ => Err("Desktop 응답이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-approval-list") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => Ok(json!({"approvals":rium_notch_core::claude_permission::previews(value["sessionId"].as_str().unwrap_or(""))})),
+                    Err(_) => Err("승인 목록 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("승인 목록 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("codex-approval-list") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => Ok(json!({"approvals":rium_notch_core::claude_permission::codex_previews(value["sessionId"].as_str().unwrap_or(""))})),
+                    Err(_) => Err("승인 목록 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("승인 목록 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-approval-list-strict") | Some("codex-approval-list-strict") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::strict_previews(
+                        value["sessionId"].as_str().unwrap_or(""), args.get(1).map(String::as_str) == Some("codex-approval-list-strict"))
+                        .map(|rows| json!({"approvals":rows})),
+                    Err(_) => Err("승인 목록 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("승인 목록 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-approval-decide") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::decide(
+                        value["sessionId"].as_str().unwrap_or(""), value["token"].as_str().unwrap_or(""),
+                        &value["request"], value["decision"].as_str().unwrap_or("")),
+                    Err(_) => Err("승인 응답을 읽을 수 없습니다".into()),
+                },
+                _ => Err("승인 응답이 너무 깁니다".into()),
+            }
+        },
+        Some("codex-approval-decide") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::decide_codex(
+                        value["sessionId"].as_str().unwrap_or(""), value["token"].as_str().unwrap_or(""),
+                        &value["request"], value["decision"].as_str().unwrap_or("")),
+                    Err(_) => Err("승인 응답을 읽을 수 없습니다".into()),
+                },
+                _ => Err("승인 응답이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-question-answer") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::answer(
+                        value["sessionId"].as_str().unwrap_or(""), value["token"].as_str().unwrap_or(""),
+                        &value["request"], &value["answers"]),
+                    Err(_) => Err("질문 응답을 읽을 수 없습니다".into()),
+                },
+                _ => Err("질문 응답이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-request-release") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::release(
+                        value["sessionId"].as_str().unwrap_or(""), value["token"].as_str().unwrap_or(""), &value["request"]),
+                    Err(_) => Err("요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("요청이 너무 깁니다".into()),
+            }
+        },
+        Some("codex-request-release") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(65_537).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 65_536 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_permission::release_codex(
+                        value["sessionId"].as_str().unwrap_or(""), value["token"].as_str().unwrap_or(""), &value["request"]),
+                    Err(_) => Err("요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("요청이 너무 깁니다".into()),
+            }
+        },
+        Some("agent-interrupt") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::agent_control::interrupt(value["sessionId"].as_str().unwrap_or("")),
+                    Err(_) => Err("중단 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("중단 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("claude-interrupt") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(4_097).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 4_096 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::claude_control::interrupt(value["sessionId"].as_str().unwrap_or("")),
+                    Err(_) => Err("중단 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("중단 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("agent-followup") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(120_513).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 120_512 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::agent_control::followup(
+                        value["sessionId"].as_str().unwrap_or(""), value["text"].as_str().unwrap_or(""),
+                        value["messageId"].as_str().unwrap_or("")),
+                    Err(_) => Err("전송 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("전송 요청이 너무 깁니다".into()),
+            }
+        },
+        Some("agent-answer") => {
+            let mut input = Vec::new();
+            match io::stdin().lock().take(32_769).read_to_end(&mut input) {
+                Ok(_) if input.len() <= 32_768 => match serde_json::from_slice::<Value>(&input) {
+                    Ok(value) => rium_notch_core::agent_control::answer(
+                        value["sessionId"].as_str().unwrap_or(""), value["questionId"].as_str().unwrap_or(""),
+                        value["question"].as_str().unwrap_or(""), &value["options"], value["answer"].as_str().unwrap_or("")),
+                    Err(_) => Err("답변 요청을 읽을 수 없습니다".into()),
+                },
+                _ => Err("답변 요청이 너무 깁니다".into()),
+            }
+        },
         _ => Err("지원하지 않는 명령입니다".into()),
     };
     match result { Ok(v)=>emit(json!({"event":"result","data":v})), Err(e)=>{emit(json!({"event":"error","message":e})); std::process::exit(1)} }
