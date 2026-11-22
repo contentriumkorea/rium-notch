@@ -10984,9 +10984,7 @@ private func publishedReceiveFixture(_ file: URL) -> Progress {
     return progress
 }
 
-if CommandLine.arguments.dropFirst().first == "--finish-update" {
-    UpdateInstaller.finish()
-} else if CommandLine.arguments.contains("--self-test-helper-pipe") {
+if CommandLine.arguments.contains("--self-test-helper-pipe") {
     let pipe = Pipe()
     guard suppressBrokenPipeSignal(pipe.fileHandleForWriting) else { fatalError("pipe signal setup failed") }
     try pipe.fileHandleForReading.close()
@@ -13038,100 +13036,15 @@ if CommandLine.arguments.dropFirst().first == "--finish-update" {
     }
     print("home variants, background, tab ordering and editor geometry self-test passed")
 } else if CommandLine.arguments.contains("--self-test-updater") {
-    func release(_ tag: String, _ url: String, prerelease: Bool = false) -> Data {
-        try! JSONSerialization.data(withJSONObject: ["tag_name": tag, "html_url": url, "draft": false, "prerelease": prerelease])
-    }
-    let good = release("v1.2.3", "https://github.com/contentriumkorea/rium-notch/releases/tag/v1.2.3")
-    guard UpdateController.parse(good, current: "1.2.2").0.hasPrefix("새 릴리스"),
-          UpdateController.parse(good, current: "1.2.3").0.hasPrefix("최신 릴리스"),
-          UpdateController.parse(release("v1.2.3", "https://evil.example/contentriumkorea/rium-notch/releases/tag/v1.2.3"), current: "1.0.0").1 == nil,
-          UpdateController.parse(release("v1.2.3", "https://github.com/contentriumkorea/rium-notch/releases/tag/v1.2.3", prerelease: true), current: "1.0.0").1 == nil,
-          UpdateController.version("v1.2.3-beta") == nil else { fatalError("updater validation failed") }
-    guard UpdateController.isDue(last: 0, now: 100),
-          !UpdateController.isDue(last: 100, now: 100 + 86399),
-          UpdateController.isDue(last: 100, now: 100 + 86400),
-          UpdateController.isDue(last: 200, now: 100) else { fatalError("updater schedule failed") }
-    let suite = "app.rium.notch.updater-test.\(UUID().uuidString)"
-    guard let defaults = UserDefaults(suiteName: suite) else { fatalError("updater test preferences unavailable") }
-    defer { defaults.removePersistentDomain(forName: suite) }
-    let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/contentriumkorea/rium-notch/releases/latest")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-    var requests = 0
-    let updater = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in requests += 1; done(good, response, nil) })
+    let info = Bundle.main.infoDictionary ?? [:]
+    precondition((info["SUFeedURL"] as? String)?.hasPrefix("https://") == true)
+    precondition((info["SUPublicEDKey"] as? String).flatMap { Data(base64Encoded: $0) }?.count == 32)
+    precondition(info["SUVerifyUpdateBeforeExtraction"] as? Bool == true)
+    precondition(info["SURequireSignedFeed"] as? Bool == true)
+    let updater = UpdateController()
     updater.start()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    guard requests == 1, updater.status.hasPrefix("새 릴리스"), updater.releaseURL != nil else { fatalError("automatic update check failed") }
-    let restored = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, _ in requests += 1 })
-    restored.start()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    guard requests == 1, restored.status.hasPrefix("새 릴리스"), restored.releaseURL != nil else { fatalError("update cache or throttle failed") }
-    let upgraded = UpdateController(defaults: defaults, currentVersion: "1.2.3", fetch: { _, done in requests += 1; done(good, response, nil) })
-    upgraded.start()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    guard requests == 2, upgraded.status.hasPrefix("최신 릴리스"),
-          defaults.string(forKey: "rium.update.lastCheckedAppVersion") == "1.2.3" else { fatalError("upgraded app did not refresh release information") }
-    defaults.removeObject(forKey: "rium.update.lastCheck")
-    let malformed = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in done(Data("{}".utf8), response, nil) })
-    malformed.check()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    guard defaults.double(forKey: "rium.update.lastCheck") == 0, malformed.releaseURL != nil else { fatalError("invalid response suppressed retry or erased cached release") }
-
-    var releaseInfo = try JSONSerialization.jsonObject(with: good) as! [String: Any]
-    let assetURL = "https://github.com/contentriumkorea/rium-notch/releases/download/v1.2.3/\(UpdateAsset.name)"
-    var assetInfo: [String: Any] = [
-        "name": UpdateAsset.name, "state": "uploaded", "size": 3,
-        "browser_download_url": assetURL,
-        "digest": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    ]
-    releaseInfo["assets"] = [assetInfo]
-    let updateData = try JSONSerialization.data(withJSONObject: releaseInfo)
-    guard let asset = UpdateAsset(release: releaseInfo, tag: "v1.2.3") else { fatalError("valid update asset was rejected") }
-    assetInfo["browser_download_url"] = assetURL.replacingOccurrences(of: "github.com", with: "example.org")
-    releaseInfo["assets"] = [assetInfo]
-    precondition(UpdateAsset(release: releaseInfo, tag: "v1.2.3") == nil)
-
-    var installs = 0
-    let oneClick = UpdateController(defaults: defaults, currentVersion: "1.2.2",
-                                    fetch: { _, done in done(updateData, response, nil) },
-                                    installUpdate: { downloaded, _, failed in
-        precondition(downloaded.url == asset.url)
-        installs += 1
-        failed("fixture")
-    })
-    oneClick.check()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    precondition(installs == 0, "scheduled checks must not install")
-    oneClick.check(install: true)
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    precondition(installs == 1 && oneClick.status == "fixture" && !oneClick.installing)
-    let previewOnly = UpdateController(defaults: defaults, currentVersion: "1.2.2", fetch: { _, done in done(good, response, nil) })
-    previewOnly.check(install: true)
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    precondition(previewOnly.status.contains("서명·공증된 업데이트 파일이 아직 없습니다."))
-
-    let sandbox = FileManager.default.temporaryDirectory.appendingPathComponent("rium-updater-test-\(UUID())")
-    defer { try? FileManager.default.removeItem(at: sandbox) }
-    let current = sandbox.appendingPathComponent("Current.app")
-    let candidate = sandbox.appendingPathComponent("Candidate.app")
-    try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
-    let currentPayload = current.appendingPathComponent("payload")
-    let candidatePayload = candidate.appendingPathComponent("payload")
-    let new = Data("abc".utf8)
-    let old = Data("old".utf8)
-    try old.write(to: currentPayload)
-    try new.write(to: candidatePayload)
-    try asset.verify(candidatePayload)
-    do {
-        try asset.verify(currentPayload)
-        fatalError("damaged asset passed its checksum")
-    } catch UpdateInstaller.Failure.integrity {}
-    precondition(UpdateInstaller.replace(current: current, candidate: candidate) { _ in false } == .relaunch)
-    let restoredBytes = try Data(contentsOf: currentPayload)
-    precondition(restoredBytes == old, "failed launch must restore the original")
-    precondition(UpdateInstaller.replace(current: current, candidate: candidate) { url in
-        (try? Data(contentsOf: url.appendingPathComponent("payload"))) == new
-    } == nil)
-    print("updater checks, asset verification, one-click dispatch, atomic replacement and rollback self-test passed")
+    precondition(updater.canCheck)
+    print("Sparkle updater, public key and signed appcast configuration self-test passed")
 } else if CommandLine.arguments.contains("--self-test-media-source-change") {
     func outputChanges(_ selectors: [AudioObjectPropertySelector]) -> (volume: Bool, playback: Bool) {
         selectors.map {

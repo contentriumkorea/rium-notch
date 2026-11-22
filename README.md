@@ -62,11 +62,11 @@ open '../Rium Notch.app'
 
 이 프로젝트는 개발 중이며 기능·디자인과 안정성이 계속 바뀝니다. 사용량 추적 기능과 일부 조명 스타일은 준비 중입니다. macOS 권한을 사용하는 기능, 다른 기기에서의 AirDrop, 다양한 화면 환경과 서명된 배포는 추가 검증이 필요합니다. 음악 제어는 macOS 비공개 MediaRemote 인터페이스를 사용하므로 OS 업데이트에 따라 동작이 달라질 수 있습니다. Codex·Claude 연동은 로컬 세션 정보를 읽으며 일부 상태는 기존 Glance 로컬 상태 파일을 참조할 수 있습니다.
 
-서명·공증된 배포본의 설정에서 **업데이트**를 누르면 GitHub에서 새 버전을 내려받아 검증한 뒤 앱을 교체하고 다시 엽니다. 현재 공개된 미리보기는 DMG에서 설치해야 합니다. 배포 조건과 네트워크 기능은 [상세 안내](docs/BUILD.md)를 참고하세요.
+Sparkle이 포함된 버전의 설정에서 **업데이트**를 누르면 GitHub에서 새 버전을 내려받아 프로젝트의 서명으로 검증한 뒤 앱을 교체하고 다시 엽니다. v0.2.1 이하에서 옮겨 올 때는 Sparkle이 포함된 첫 버전을 DMG로 설치합니다. 배포 조건과 네트워크 기능은 [상세 안내](docs/BUILD.md)를 참고하세요.
 
 <details><summary><strong>English overview</strong></summary>
 
-Rium Notch is an in-development macOS notch utility for Apple silicon. It includes media, agent status and quick tools. An unsigned DMG is available; signed and notarized installers and automatic installation are not available yet.
+Rium Notch is an in-development macOS notch utility for Apple silicon. It includes media, agent status, quick tools and Sparkle updates signed by the project. The GitHub preview DMG is not notarized by Apple.
 
 </details>
 

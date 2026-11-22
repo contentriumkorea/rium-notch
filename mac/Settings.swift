@@ -295,9 +295,8 @@ struct SettingsView: View {
                         Text(appVersion).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("업데이트") { updater.check(install: true) }
-                        .disabled(updater.checking || updater.installing)
-                    if updater.releaseURL != nil { Button("릴리스 정보") { updater.openRelease() } }
+                    Button("업데이트") { updater.check() }
+                        .disabled(!updater.canCheck)
                 }
                 Text(updater.status).font(.caption).foregroundStyle(.secondary)
                 Toggle("GitHub 릴리스 자동 확인", isOn: Binding(get: { updater.autoCheck }, set: { updater.setAutoCheck($0) }))

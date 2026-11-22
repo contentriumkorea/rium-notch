@@ -4,7 +4,7 @@
 
 - Apple silicon Mac, macOS 14 이상
 - Xcode Command Line Tools, Rust와 Cargo, CMake
-- Rust 의존성을 처음 내려받기 위한 네트워크 연결
+- Rust 의존성과 Sparkle을 처음 내려받기 위한 네트워크 연결
 
 `zsh build.sh`는 Rust 코어와 SwiftUI 앱, 포함된 BSD 라이선스 MediaRemote Adapter 소스를 빌드해 저장소 상위 폴더에 `Rium Notch.app`을 만듭니다. 기존 앱을 덮어쓸 때는 빌드 스크립트의 백업 보호 조건을 충족해야 합니다. 별도 위치에 빌드하려면 `RIUM_APP_DESTINATION`에 앱 번들 전체 경로를 지정하세요.
 
@@ -20,9 +20,11 @@
 
 ## 업데이트
 
-서명·공증된 배포본을 응용 프로그램 폴더에서 실행한 뒤 **설정 → 일반 → 업데이트**를 누릅니다. GitHub 최신 릴리스에 더 높은 버전의 서명·공증된 DMG가 있으면 다운로드, 검증, 앱 교체, 재실행이 이어집니다. 앱 교체 전 GitHub의 SHA-256, 번들 ID, 버전, 설치본의 서명 요구 사항과 macOS 배포 정책을 확인합니다.
+응용 프로그램 폴더에서 Sparkle이 포함된 버전을 실행하고 **설정 → 일반 → 업데이트**를 누릅니다. 더 높은 버전이 있으면 GitHub에서 다운로드해 서명을 검증한 뒤 앱을 교체하고 다시 엽니다. 자동 확인을 켜면 Sparkle이 새 버전을 찾아 사용자에게 설치 여부를 묻습니다.
 
-자동 확인은 기본으로 켜져 있으며 새 버전 유무를 확인합니다. 설치는 **업데이트**를 눌렀을 때 진행됩니다. v0.2.1 이하 또는 임시 서명된 미리보기에서 옮겨 올 때는 첫 서명·공증된 배포본을 DMG에서 한 번 설치해야 합니다.
+v0.2.1 이하를 쓰고 있다면 Sparkle이 포함된 첫 버전을 DMG에서 한 번 설치합니다. 미공증 앱은 macOS 설정에 따라 첫 실행이나 업데이트 후 추가 확인이 필요할 수 있습니다.
+
+업데이트 배포 시 같은 Mac의 키체인에서 `app.rium.notch.updates` 서명 키를 사용합니다. `zsh scripts/create-dmg.sh`로 DMG를 만들고, `zsh scripts/create-appcast.sh build/Rium-Notch-macOS-arm64-unsigned.dmg`로 업데이트 파일과 피드에 서명합니다. `VERSION`과 일치하는 GitHub 안정 릴리스 태그에 DMG를 업로드한 뒤 `build/appcast.xml`을 저장소 루트의 `appcast.xml`로 게시합니다. 피드 내용을 수정할 때는 다시 서명해야 합니다.
 
 ## 네트워크와 권한
 
