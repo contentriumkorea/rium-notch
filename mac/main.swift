@@ -214,6 +214,22 @@ struct Account: Identifiable {
     var detail = ""
     var additionalUsage: [String] = []
     var connected = false
+    var remaining: CodexRemainingWindow?
+}
+struct CodexRemainingWindow {
+    let percent: Int
+    let reset: Date?
+
+    init?(_ payload: Any?) {
+        guard let window = payload as? [String: Any], let used = window["usedPercent"] as? Double,
+              (0...100).contains(used) else { return nil }
+        percent = Int((100 - used).rounded())
+        if let time = window["resetsAt"] as? Double, time.isFinite, time > 0 {
+            reset = Date(timeIntervalSince1970: time)
+        } else {
+            reset = nil
+        }
+    }
 }
 struct ClipboardMetadata: Decodable { let id: UInt64; let kind: String; let size: Int; let pinned: Bool?; let copiedAtMs: UInt64? }
 func clipboardImageSize(_ count: Int) -> String {
@@ -996,9 +1012,6 @@ func shortcutFeedback(_ action: ShortcutAction, previews: Bool, lights: Bool, cl
     if previews { return .preview }
     return action == .paste && lights && clipboardLight ? .pasteLight : .none
 }
-// Monitoring is held back while the Glance interface is being rebuilt.
-// The implementation remains available for the later integration stage.
-let usageTrackingEnabled = false
 enum Brand {
     static let icon: NSImage? = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
 }
@@ -1573,7 +1586,18 @@ final class Model: ObservableObject {
     @Published var swap = "확인 중"
     @Published var cpuHistory: [Double?] = []
     @Published var memoryHistory: [Double?] = []
+    @Published private(set) var usageTrackingEnabled = false
+    @Published private(set) var monitorAccountID: String?
     @Published var accounts: [Account] = []
+    var monitorCodexRemaining: Int? {
+        guard let id = monitorAccountID, let account = accounts.first(where: { $0.id == id }), account.connected,
+              let window = account.remaining, window.reset.map({ $0 > Date() }) ?? true else { return nil }
+        return window.percent
+    }
+    var monitorSummary: String {
+        let quota = monitorCodexRemaining.map { "\($0)% 남음" } ?? "조회 불가"
+        return "시스템 모니터링, CPU 사용 \(cpu), RAM 사용 \(memoryPercent), 메모리 압력 \(pressure), Codex \(quota)"
+    }
     @Published var message = ""
     @Published var expanded = false {
         didSet {
@@ -1954,6 +1978,11 @@ final class Model: ObservableObject {
             || externalAgentItems.contains { agentIsRunning($0.state) || agentNeedsAttention($0.state) }
     }
     var collapsedIsIdle: Bool { !showsCollapsedAgent && !dictationDisplayActive && !receivingFile && receivedFilePeek == nil && shortcutPeek == nil && caseKeyPeek == nil && batteryPeek == nil && weatherPeek == nil && visibleClipboardPeek == nil && !visibleAirDropPeek && visibleTrackSkipPeek == nil && visibleSystemNotificationPeek == nil && visibleFocusAlarmPeek == nil && timerState == 0 && !mediaLightPlaying && volumeOverlay.isEmpty }
+    var showsCompactMonitor: Bool {
+        usageTrackingEnabled && collapsedIsIdle && !shelfRevealVisible && visibleAgentTransientPeek == nil &&
+        visiblePermissionPeek == nil && !visibleAssistantPeek && assistantIndicator == .off &&
+        !assistantFinishing && !assistantListening && !assistantSpeaking
+    }
     private var notchScreenAvailable: Bool { !systemNotificationScreenLocked && !systemNotificationSleeping }
     var visiblePermissionPeek: AgentActivity? {
         guard notchScreenAvailable, !expanded, !shelfRevealVisible, !dictationDisplayActive, !receivingFile, receivedFilePeek == nil,
@@ -2043,10 +2072,15 @@ final class Model: ObservableObject {
         agentItems.first { sameAgentSession($0, peek.agent) } ?? peek.agent
     }
     var collapsedNotchSize: CGSize {
-        calculateCollapsedNotchSize(cameraWidth: cameraExclusion, cameraHeight: cameraHeight, screenWidth: displayWidth,
+        var size = calculateCollapsedNotchSize(cameraWidth: cameraExclusion, cameraHeight: cameraHeight, screenWidth: displayWidth,
                            agent: showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || visibleClipboardPeek != nil || visibleAirDropPeek || visibleTrackSkipPeek != nil || visibleSystemNotificationPeek != nil || !volumeOverlay.isEmpty, timer: timerState != 0, music: mediaLightPlaying,
                            notification: visibleSystemNotificationPeek != nil, focusAlarm: visibleFocusAlarmPeek != nil, shelf: shelfRevealVisible,
                            shelfMinimumWidth: shelfConfirmationKind == .screenshot ? 0 : shelfDragWidth)
+        if showsCompactMonitor && cameraExclusion > 0 {
+            let monitorWidth = cameraExclusion + 8 + 2 * (CompactMonitorBadge.sideInset + CompactMonitorBadge.size)
+            size.width = max(size.width, min(monitorWidth, displayWidth - 24))
+        }
+        return size
     }
     var expandedNotchSize: CGSize {
         let width = notchWidth(expanded: true, displayWidth: displayWidth)
@@ -2356,7 +2390,6 @@ final class Model: ObservableObject {
         if agentNotificationsEnabled { refreshAgentNotificationPermission() }
         weatherAlertsEnabled = UserDefaults.standard.bool(forKey: "rium.weather.alerts")
         lyricsEnabled = UserDefaults.standard.bool(forKey: "rium.lyrics.enabled")
-        if usageTrackingEnabled { sample(); monitorMemoryPressure() }
         let savedInterval = UserDefaults.standard.integer(forKey: "rium.monitor.interval")
         hoverEnabled = UserDefaults.standard.object(forKey: "rium.notch.hover") as? Bool ?? true
         autoHideEnabled = UserDefaults.standard.object(forKey: "rium.notch.autoHide") as? Bool ?? true
@@ -2364,20 +2397,14 @@ final class Model: ObservableObject {
             autoHideDelay = min(3, max(0.1, delay))
         }
         sampleInterval = [2, 5, 10].contains(savedInterval) ? savedInterval : 2
-        if usageTrackingEnabled { scheduleSampling() }
+        monitorAccountID = UserDefaults.standard.string(forKey: "rium.monitor.account")
+        if UserDefaults.standard.object(forKey: "rium.monitor.enabled") as? Bool ?? true { setUsageTrackingEnabled(true) }
         if UserDefaults.standard.bool(forKey: "rium.airdrop.enabled") { airDropEnabled = true; airDropMonitor.start() }
         if UserDefaults.standard.bool(forKey: "rium.screenshot.enabled") { screenshotEnabled = true; screenshotMonitor.start() }
-        if usageTrackingEnabled { listAccounts() }
         if let cache = UserDefaults.standard.dictionary(forKey: "rium.weather.cache"),
            let data = cache["data"] as? [String: Any], let updated = cache["updated"] as? Double {
             showWeather(city: cache["city"] as? String ?? "선택 도시", data: data, updated: Date(timeIntervalSince1970: updated), timeZoneID: cache["timezone"] as? String)
             refreshStaleWeather()
-        }
-        if usageTrackingEnabled {
-            accountTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-                guard let self = self else { return }
-                for account in self.accounts { self.refresh(account.id) }
-            }
         }
         let clockTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
@@ -3163,6 +3190,33 @@ final class Model: ObservableObject {
     func scheduleSampling() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(sampleInterval), repeats: true) { [weak self] _ in self?.sample() }
+    }
+    func setUsageTrackingEnabled(_ enabled: Bool) {
+        guard usageTrackingEnabled != enabled else { return }
+        usageTrackingEnabled = enabled
+        guard servicesEnabled else { return }
+        UserDefaults.standard.set(enabled, forKey: "rium.monitor.enabled")
+        if enabled {
+            sample()
+            monitorMemoryPressure()
+            scheduleSampling()
+            listAccounts()
+            accountTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                guard let self, let id = self.monitorAccountID,
+                      self.accounts.contains(where: { $0.id == id }) else { return }
+                self.refresh(id)
+            }
+        } else {
+            timer?.invalidate(); timer = nil
+            accountTimer?.invalidate(); accountTimer = nil
+            pressureSource?.cancel(); pressureSource = nil; pressureEvent = nil
+        }
+    }
+    func setMonitorAccount(_ id: String?) {
+        monitorAccountID = id
+        guard servicesEnabled else { return }
+        UserDefaults.standard.set(id, forKey: "rium.monitor.account")
+        if usageTrackingEnabled, let id { refresh(id) }
     }
     func setSampleInterval(_ seconds: Int) {
         guard [2, 5, 10].contains(seconds) else { return }
@@ -5501,9 +5555,12 @@ final class Model: ObservableObject {
             if let rows = e["data"] as? [[String: Any]] {
                 self.accounts = rows.compactMap { row in
                     guard let id = row["id"] as? String, let name = row["name"] as? String else { return nil }
-                    return Account(id: id, name: name)
+                    var account = self.accounts.first(where: { $0.id == id }) ?? Account(id: id, name: name)
+                    account.name = name
+                    return account
                 }
-                for account in self.accounts { self.refresh(account.id) }
+                if self.usageTrackingEnabled, let id = self.monitorAccountID,
+                   self.accounts.contains(where: { $0.id == id }) { self.refresh(id) }
             } else if let error = e["message"] as? String { self.message = error }
         }
     }
@@ -5515,36 +5572,43 @@ final class Model: ObservableObject {
             guard let self = self else { return }
             if e["event"] as? String == "result" {
                 let data = e["data"] as? [String: Any] ?? [:]
-                let status = data["status"] as? String ?? "unknown"
-                let label: String
-                switch status {
-                case "connected": label = codexWindow(data["primary"]) ?? "사용량 조회 불가"
-                case "disconnected": label = "로그인 필요"
-                case "unsupported": label = "지원하지 않는 계정"
-                default: label = "계정 상태 확인 불가"
-                }
-                var details: [String] = []
-                if status == "connected", let secondary = codexWindow(data["secondary"]) { details.append(secondary) }
-                if status == "connected", data["ordinaryUsageAllowed"] as? Bool == false { details.append("기본 사용 제한 중") }
-                if status == "connected", data["spendControlReached"] as? Bool == true { details.append("지출 한도 도달") }
-                if status == "connected" { details.append(contentsOf: codexRestrictions(data)) }
-                if status == "connected", let available = data["resetCreditsAvailable"] as? Int, available > 0 { details.append("한도 초기화 크레딧 \(available)개") }
-                if status == "connected", let credits = data["credits"] as? [String: Any] {
-                    if credits["unlimited"] as? Bool == true { details.append("크레딧 무제한") }
-                    else if let balance = credits["balance"] as? String, let number = Double(balance) { details.append(String(format: "크레딧 %.2f", number)) }
-                    else if let balance = credits["balance"] as? NSNumber { details.append(String(format: "크레딧 %.2f", balance.doubleValue)) }
-                }
-                if let i = self.accounts.firstIndex(where: { $0.id == id }) {
-                    self.accounts[i].usage = label
-                    self.accounts[i].detail = details.joined(separator: " · ")
-                    self.accounts[i].additionalUsage = status == "connected" ? codexAdditionalUsage(data) : []
-                    self.accounts[i].connected = status == "connected"
-                }
+                self.applyCodexUsage(data, to: id)
                 self.busy.remove(id)
             } else if let error = e["message"] as? String {
-                if let i = self.accounts.firstIndex(where: { $0.id == id }) { self.accounts[i].usage = error; self.accounts[i].detail = ""; self.accounts[i].additionalUsage = [] }
+                if let i = self.accounts.firstIndex(where: { $0.id == id }) {
+                    self.accounts[i].usage = error; self.accounts[i].detail = ""; self.accounts[i].additionalUsage = []; self.accounts[i].remaining = nil
+                }
                 self.busy.remove(id)
             }
+        }
+    }
+
+    private func applyCodexUsage(_ data: [String: Any], to id: String) {
+        let status = data["status"] as? String ?? "unknown"
+        let label: String
+        switch status {
+        case "connected": label = codexWindow(data["primary"]) ?? "사용량 조회 불가"
+        case "disconnected": label = "로그인 필요"
+        case "unsupported": label = "지원하지 않는 계정"
+        default: label = "계정 상태 확인 불가"
+        }
+        var details: [String] = []
+        if status == "connected", let secondary = codexWindow(data["secondary"]) { details.append(secondary) }
+        if status == "connected", data["ordinaryUsageAllowed"] as? Bool == false { details.append("기본 사용 제한 중") }
+        if status == "connected", data["spendControlReached"] as? Bool == true { details.append("지출 한도 도달") }
+        if status == "connected" { details.append(contentsOf: codexRestrictions(data)) }
+        if status == "connected", let available = data["resetCreditsAvailable"] as? Int, available > 0 { details.append("한도 초기화 크레딧 \(available)개") }
+        if status == "connected", let credits = data["credits"] as? [String: Any] {
+            if credits["unlimited"] as? Bool == true { details.append("크레딧 무제한") }
+            else if let balance = credits["balance"] as? String, let number = Double(balance) { details.append(String(format: "크레딧 %.2f", number)) }
+            else if let balance = credits["balance"] as? NSNumber { details.append(String(format: "크레딧 %.2f", balance.doubleValue)) }
+        }
+        if let i = accounts.firstIndex(where: { $0.id == id }) {
+            accounts[i].usage = label
+            accounts[i].detail = details.joined(separator: " · ")
+            accounts[i].additionalUsage = status == "connected" ? codexAdditionalUsage(data) : []
+            accounts[i].connected = status == "connected"
+            accounts[i].remaining = status == "connected" ? CodexRemainingWindow(data["primary"]) : nil
         }
     }
 
@@ -5553,7 +5617,12 @@ final class Model: ObservableObject {
         run(["login", id]) { [weak self] e in
             guard let self = self else { return }
             if e["event"] as? String == "login_url", let str = e["url"] as? String, let url = URL(string: str), url.host == "auth.openai.com" { NSWorkspace.shared.open(url) }
-            if e["event"] as? String == "result" { self.busy.remove(id); self.message = "로그인 완료"; self.refresh(id) }
+            if e["event"] as? String == "result" {
+                self.busy.remove(id)
+                let data = e["data"] as? [String: Any] ?? [:]
+                self.applyCodexUsage(data, to: id)
+                self.message = data["status"] as? String == "connected" ? "로그인 완료" : "Codex 사용량을 확인할 수 없습니다"
+            }
             if let error = e["message"] as? String { self.busy.remove(id); self.message = error }
         }
     }
@@ -5567,8 +5636,15 @@ final class Model: ObservableObject {
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
         run(["create", name]) { [weak self] e in
-            if let row = e["data"] as? [String: Any], let id = row["id"] as? String { self?.listAccounts(); self?.login(id) }
-            else if let error = e["message"] as? String { self?.message = error }
+            guard let self = self else { return }
+            if let row = e["data"] as? [String: Any], let id = row["id"] as? String {
+                if !self.accounts.contains(where: { $0.id == id }) {
+                    self.accounts.append(Account(id: id, name: row["name"] as? String ?? name))
+                }
+                self.login(id)
+            } else if let error = e["message"] as? String {
+                self.message = error
+            }
         }
     }
     func renameAccount(_ account: Account) {
@@ -5604,6 +5680,7 @@ final class Model: ObservableObject {
             guard let self = self else { return }
             if event["event"] as? String == "result" {
                 self.accounts.removeAll { $0.id == account.id }
+                if self.monitorAccountID == account.id { self.setMonitorAccount(nil) }
                 self.busy.remove(account.id); self.message = "계정 연결을 해제했습니다"
             } else if let error = event["message"] as? String {
                 self.busy.remove(account.id); self.message = error
@@ -6582,6 +6659,7 @@ struct NotchView: View {
     private var headerHorizontalPadding: CGFloat {
         let padding = collapsedHeaderPadding(width: visualSize.width, cameraWidth: model.cameraExclusion)
         if model.dictationDisplayActive && !model.assistantListening { return min(4, padding) }
+        if model.showsCompactMonitor { return min(CompactMonitorBadge.sideInset, padding) }
         return musicHeaderVisible ? min(8, padding) : padding
     }
 
@@ -6680,13 +6758,23 @@ struct NotchView: View {
             Label(model.volumeOverlay, systemImage: model.overlaySymbol).font(.system(size: compact ? 9 : 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
         } else if model.showsCollapsedAgent, let agent = collapsedExternalAgent {
             Button(action: { model.select(.agents); model.expanded = true }) {
-                CollapsedAgentPulse(active: agentIsRunning(agent.state), waiting: agentNeedsAttention(agent.state), completed: agent.state == "완료", activity: agent.activity, agentID: agent.id, toolEvents: agent.toolEvents, toolObservedAt: agent.toolObservedAt).id(agent.sessionKey)
-            }.buttonStyle(.plain).accessibilityLabel("\(agent.providerName) \(agent.state)").help("에이전트 활동 열기")
+                if model.usageTrackingEnabled && agentIsRunning(agent.state) {
+                    CompactMonitorBadge(model: model)
+                } else {
+                    CollapsedAgentPulse(active: agentIsRunning(agent.state), waiting: agentNeedsAttention(agent.state), completed: agent.state == "완료", activity: agent.activity, agentID: agent.id, toolEvents: agent.toolEvents, toolObservedAt: agent.toolObservedAt).id(agent.sessionKey)
+                }
+            }.buttonStyle(.plain)
+                .accessibilityLabel(model.usageTrackingEnabled && agentIsRunning(agent.state) ? "\(agent.providerName) \(agent.state), \(model.monitorSummary)" : "\(agent.providerName) \(agent.state)")
+                .help(model.usageTrackingEnabled && agentIsRunning(agent.state) ? model.monitorSummary : "에이전트 활동 열기")
         } else if model.assistantIndicator != .off || model.assistantFinishing || model.assistantListening || model.assistantSpeaking {
             Button(action: { model.select(.assistant); model.expanded = true }) {
-                CollapsedAgentPulse(active: model.assistantIndicator == .working,
+                if model.usageTrackingEnabled && model.assistantIndicator == .working {
+                    CompactMonitorBadge(model: model)
+                } else {
+                    CollapsedAgentPulse(active: model.assistantIndicator == .working,
                                     waiting: model.assistantIndicator == .approval || model.assistantIndicator == .question,
                                     completed: model.assistantFinishing && model.assistant.lastOutcome == "completed", activity: "", agentID: model.assistantAnimationID, toolEvents: []).id(model.assistantAnimationID)
+                }
             }.buttonStyle(.plain).accessibilityLabel("AI 대화 \(assistantStateLabel)").help("AI 대화 열기")
         } else if let date = model.weatherPeek {
             Button(action: { model.select(.weather); model.expanded = true }) {
@@ -6705,15 +6793,15 @@ struct NotchView: View {
             Button(action: { model.select(.music); model.expanded = true }) {
                 CollapsedMusicWave(tint: model.mediaLightColor, spectrum: model.musicSpectrum)
             }.buttonStyle(.plain).help("음악 열기").accessibilityLabel("음악 재생 중")
-        } else if usageTrackingEnabled {
+        } else if model.showsCompactMonitor {
             Button(action: { model.select(.monitor); model.expanded = true }) {
-                HStack(spacing: compact ? 3 : 8) {
-                    Text("CPU \(model.cpu)"); Text("RAM \(model.memoryPercent)")
-                    if !compact { Text(model.pressure) }
-                }.font(.system(size: compact ? 9 : 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
-            }.buttonStyle(.plain).help("시스템 모니터링")
+                CompactMonitorBadge(model: model).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .help(model.monitorSummary)
+                .accessibilityLabel(model.monitorSummary)
         }
     }
+    private var compactMonitorVerticalPadding: CGFloat { max(0, (visualSize.height - CompactMonitorBadge.size) / 2) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if visualExpanded && floatingSize == nil {
@@ -6721,8 +6809,10 @@ struct NotchView: View {
                 // title or monitoring controls inside the expanded notch.
                 Color.clear.frame(height: max(0, (model.cameraHeight > 0 ? model.cameraHeight : 32) - 17))
                     .allowsHitTesting(false).accessibilityHidden(true)
-            } else if !visualExpanded && (model.shelfRevealVisible || model.collapsedIsIdle || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleClipboardPeek != nil || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil) {
+            } else if !visualExpanded && (model.shelfRevealVisible || (model.collapsedIsIdle && !model.showsCompactMonitor) || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleClipboardPeek != nil || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil) {
                 EmptyView()
+            } else if !visualExpanded && model.showsCompactMonitor {
+                headerControls(compact: true).frame(maxWidth: .infinity, alignment: .trailing)
             } else if !visualExpanded && model.cameraExclusion > 0 && floatingSize == nil {
                 let metrics = collapsedHeaderMetrics(width: model.currentNotchSize.width, cameraWidth: model.cameraExclusion, padding: headerHorizontalPadding)
                 let gap = metrics.gap, side = metrics.side
@@ -6852,7 +6942,7 @@ struct NotchView: View {
                             Button("집중 타이머") { model.select(.monitor) }
                             Button("메모") { model.select(.notes) }
                             Button("AI 대화") { model.select(.assistant) }
-                            if usageTrackingEnabled { Button("시스템 모니터링") { model.select(.monitor) } }
+                            if model.usageTrackingEnabled { Button("시스템 모니터링") { model.select(.monitor) } }
                         }
                         Divider()
                         Button("설정…") { (NSApp.delegate as? AppDelegate)?.showSettings() }
@@ -6915,10 +7005,17 @@ struct NotchView: View {
                         InterviewView(model: model, interview: model.interview, suggestions: model.interview.suggestions)
                     }
                 } else {
-                if usageTrackingEnabled {
+                if model.usageTrackingEnabled {
                 HStack(alignment: .top, spacing: 14) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text("시스템 모니터링").font(.system(size: 14, weight: .semibold))
+                        HStack(spacing: 9) {
+                            CompactMonitorBadge(model: model, diameter: 36)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("시스템 모니터링").font(.system(size: 14, weight: .semibold))
+                                Text(model.monitorCodexRemaining.map { "Codex 기본 한도 \($0)% 남음" } ?? "Codex 잔여량 확인 전")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
                         HStack { VStack(alignment: .leading) { Text("CPU  \(model.cpu)"); Text("최근 사용률").font(.caption2).foregroundStyle(.secondary) }; Spacer(); Sparkline(samples: model.cpuHistory).stroke(Color.cyan.opacity(0.8), lineWidth: 1.5).frame(width: 100, height: 23).accessibilityHidden(true) }
                         HStack { VStack(alignment: .leading) { Text("RAM  \(model.memoryPercent)"); Text(model.memory).font(.caption2).foregroundStyle(.secondary) }; Spacer(); Sparkline(samples: model.memoryHistory).stroke(Color.purple.opacity(0.9), lineWidth: 1.5).frame(width: 100, height: 23).accessibilityHidden(true) }
                         HStack { Text("메모리 압력  \(model.pressure)"); Spacer(); Text("스왑  \(model.swap)") }.font(.caption)
@@ -6992,7 +7089,7 @@ struct NotchView: View {
         .padding(.horizontal, model.shelfRevealVisible ? 16 : (floatingSize == nil && !visualExpanded && model.visibleSystemNotificationPeek != nil ? 22 : (floatingSize == nil && !visualExpanded && model.cameraExclusion > 0 && !model.visibleAssistantPeek ? headerHorizontalPadding : notchContentHorizontalPadding(floating: floatingSize != nil, visualExpanded: visualExpanded,
                                                            assistantPeek: model.visibleAssistantPeek, width: visualSize.width,
                                                            cameraWidth: model.cameraExclusion))))
-        .padding(.vertical, floatingSize != nil && !visualExpanded ? 2 : (visualExpanded ? 12 : (model.shelfRevealVisible || model.dictationDisplayActive || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleClipboardPeek != nil || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil || model.showsCollapsedAgent ? 1 : (musicHeaderVisible ? max(0, (visualSize.height - 24.92) / 2) : 8))))
+        .padding(.vertical, floatingSize != nil && !visualExpanded ? 2 : (visualExpanded ? 12 : (model.shelfRevealVisible || model.dictationDisplayActive || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleClipboardPeek != nil || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil || model.showsCollapsedAgent ? 1 : (model.showsCompactMonitor ? compactMonitorVerticalPadding : (musicHeaderVisible ? max(0, (visualSize.height - 24.92) / 2) : 8)))))
         .frame(width: visualSize.width, height: visualSize.height, alignment: .top)
         // The persistent opaque background is drawn by NotchContainer.
         .foregroundStyle(.white)
@@ -8354,7 +8451,8 @@ private struct AgentTransientPreview: View {
     }
     var body: some View {
         let agent = model.liveAgent(for: peek)
-        let statusVisible = reduceMotion || rightEntranceVisible
+        let showMonitor = model.usageTrackingEnabled && peek.kind == .running
+        let statusVisible = reduceMotion || rightEntranceVisible || showMonitor
         Button { model.select(.agents); model.expanded = true } label: {
             GeometryReader { geometry in
                 let metrics = agentPeekBandMetrics(width: geometry.size.width, cameraWidth: model.cameraExclusion,
@@ -8368,7 +8466,9 @@ private struct AgentTransientPreview: View {
                         .clipped()
                     Color.clear.frame(width: gap).allowsHitTesting(false).accessibilityHidden(true)
                     Group {
-                        if peek.kind == .running || peek.kind == .completed {
+                        if showMonitor {
+                            CompactMonitorBadge(model: model)
+                        } else if peek.kind == .running || peek.kind == .completed {
                             CollapsedAgentPulse(active: peek.kind == .running, waiting: false, completed: peek.kind == .completed,
                                                 activity: agent.activity, agentID: agent.id, toolEvents: agent.toolEvents, toolObservedAt: agent.toolObservedAt)
                                 .id(agent.sessionKey)
@@ -8386,7 +8486,7 @@ private struct AgentTransientPreview: View {
             .frame(height: model.floatingIslandPlacement != nil ? 33 : min(33, max(0, model.currentNotchSize.height - 2)))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityLabel("\(agent.providerName) \(label)")
+        .buttonStyle(.plain).accessibilityLabel(showMonitor ? "\(agent.providerName) \(label), \(model.monitorSummary)" : "\(agent.providerName) \(label)")
         .task(id: peek.id) {
             let elapsed = ProcessInfo.processInfo.systemUptime - peek.started
             let wait = rustAgentPeekStatusWaitNanoseconds(elapsed, peek.kind == .running ? 1 : 0, reduceMotion ? 1 : 0)
@@ -16241,11 +16341,45 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
                  Double(middle) / Double(early) > 0.35 && Double(late) / Double(early) < 0.25,
                  "alarm light failed to contract: \(early), \(middle), \(late)")
     print("alarm light rendered spans: \(early), \(middle), \(late) pixels")
-} else if CommandLine.arguments.contains("--self-test-render-timer") || CommandLine.arguments.contains("--self-test-render-media-only") || CommandLine.arguments.contains("--self-test-render-media-timer") {
+} else if CommandLine.arguments.contains("--self-test-render-timer") || CommandLine.arguments.contains("--self-test-render-media-only") || CommandLine.arguments.contains("--self-test-render-media-timer") || CommandLine.arguments.contains("--self-test-render-monitor-badge") {
     guard let output = ProcessInfo.processInfo.environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
     _ = NSApplication.shared
     let model = Model(startServices: false); model.cameraExclusion = 185; model.cameraHeight = 32
-    if !CommandLine.arguments.contains("--self-test-render-media-only") { model.timerState = 1; model.timerRemaining = 1499 }
+    if CommandLine.arguments.contains("--self-test-render-monitor-badge") {
+        precondition(model.collapsedNotchSize == CGSize(width: 185, height: 32))
+        precondition(CodexRemainingWindow(["usedPercent": 101]) == nil)
+        model.setUsageTrackingEnabled(true)
+        precondition(model.showsCompactMonitor && model.collapsedNotchSize == CGSize(width: 265, height: 32))
+        let window = CodexRemainingWindow(["usedPercent": 64.0])
+        model.accounts = [Account(id: "fixture", name: "시험", connected: true, remaining: window)]
+        model.setMonitorAccount("missing")
+        precondition(model.monitorCodexRemaining == nil)
+        model.setMonitorAccount("fixture")
+        precondition(model.monitorCodexRemaining == 36)
+        let secondWindow = CodexRemainingWindow(["usedPercent": 77.0])
+        model.accounts.append(Account(id: "another", name: "두 번째 계정", connected: true, remaining: secondWindow))
+        precondition(model.monitorCodexRemaining == 36)
+        model.setMonitorAccount("another")
+        precondition(model.monitorCodexRemaining == 23)
+        model.setMonitorAccount("fixture")
+        model.accounts[0].remaining = CodexRemainingWindow(["usedPercent": 100.0, "resetsAt": 1.0])
+        precondition(model.monitorCodexRemaining == nil)
+        model.accounts[0].remaining = window
+        let environment = ProcessInfo.processInfo.environment
+        if let remaining = environment["RIUM_MONITOR_REMAINING"] {
+            let used = Double(remaining).map { 100 - $0 } ?? .nan
+            model.accounts[0].remaining = CodexRemainingWindow(["usedPercent": used])
+        }
+        model.cpuHistory = [Double(environment["RIUM_MONITOR_CPU"] ?? "45")]
+        model.memoryHistory = [Double(environment["RIUM_MONITOR_RAM"] ?? "72")]
+        model.pressure = environment["RIUM_MONITOR_PRESSURE"] ?? "정상"
+        if environment["RIUM_MONITOR_AGENT"] == "1" {
+            model.agentItems = [AgentActivity(id: "fixture", project: "시험", state: "작업 중", activity: "")]
+            precondition(!model.showsCompactMonitor && model.showsCollapsedAgent)
+        }
+    } else if !CommandLine.arguments.contains("--self-test-render-media-only") {
+        model.timerState = 1; model.timerRemaining = 1499
+    }
     if CommandLine.arguments.contains("--self-test-render-media-only") || CommandLine.arguments.contains("--self-test-render-media-timer") { model.mediaPlaying = true }
     let view = NSHostingView(rootView: NotchContainer(model: model)); view.frame = NSRect(origin: .zero, size: model.collapsedNotchSize)
     let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false); window.contentView = view

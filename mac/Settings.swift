@@ -344,6 +344,27 @@ struct SettingsView: View {
                     Text(String(format: "%.1f초", model.autoHideDelay)).monospacedDigit().frame(width: 48, alignment: .trailing)
                 }.disabled(!model.autoHideEnabled)
             }
+            SettingsCard(title: "원형 시스템 모니터") {
+                Toggle("노치에 모니터 표시", isOn: Binding(get: { model.usageTrackingEnabled }, set: { model.setUsageTrackingEnabled($0) }))
+                if model.usageTrackingEnabled {
+                    Picker("Codex 잔여량 계정", selection: Binding(get: { model.monitorAccountID }, set: { model.setMonitorAccount($0) })) {
+                        Text("선택 안 함").tag(nil as String?)
+                        ForEach(model.accounts) { account in Text(account.name).tag(Optional(account.id)) }
+                        if let id = model.monitorAccountID, !model.accounts.contains(where: { $0.id == id }) {
+                            Text("연결되지 않은 계정").tag(Optional(id))
+                        }
+                    }
+                    HStack {
+                        Button("ChatGPT 계정 추가…") { model.addAccount() }
+                        if let account = model.accounts.first(where: { $0.id == model.monitorAccountID }), !account.connected {
+                            Button("선택한 계정으로 로그인") { model.login(account.id) }
+                        }
+                    }
+                    if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary) }
+                    Text("위쪽 호는 RAM 여유와 메모리 압력, 아래쪽 점은 CPU 여유, 가운데 숫자는 선택한 계정의 기본 한도 잔여율입니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         case .appearance:
             appearanceContent
         case .tabs:

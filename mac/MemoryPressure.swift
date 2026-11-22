@@ -1,5 +1,8 @@
 import Foundation
 import Darwin
+import AppKit
+import CoreText
+import SwiftUI
 
 /// The sysctl name is an undocumented, read-only macOS interface. Fail closed
 /// when the OS does not expose it or returns an unknown pressure value.
@@ -24,4 +27,73 @@ func currentMemoryPressure() -> String? {
     guard sysctlbyname("kern.memorystatus_vm_pressure_level", &value, &length, nil, 0) == 0,
           length == MemoryLayout<UInt32>.size else { return nil }
     return memoryPressureLabel(value)
+}
+
+struct CompactMonitorBadge: View {
+    static let size: CGFloat = 26
+    static let sideInset: CGFloat = 10
+
+    @ObservedObject var model: Model
+    var diameter: CGFloat = CompactMonitorBadge.size
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var arcTint: Color {
+        switch model.pressure {
+        case "정상": .white
+        case "주의": Color(red: 1, green: 0.68, blue: 0.65)
+        case "위험": Color(red: 1, green: 0.26, blue: 0.29)
+        default: .white.opacity(0.5)
+        }
+    }
+
+    var body: some View {
+        let ramHeadroom = (model.memoryHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
+        let cpuHeadroom = (model.cpuHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
+        let stroke = StrokeStyle(lineWidth: diameter * 0.076, lineCap: .round)
+        let arcInset = diameter * 0.06
+        let center = diameter / 2
+        let arcRadius = center - arcInset
+        let quotaText = model.monitorCodexRemaining.map(String.init) ?? "—"
+        ZStack {
+            ZStack {
+                Circle().trim(from: 0, to: 0.68).stroke(arcTint.opacity(0.22), style: stroke)
+                if ramHeadroom > 0 {
+                    Circle().trim(from: 0, to: 0.68 * CGFloat(ramHeadroom)).stroke(arcTint, style: stroke)
+                }
+            }
+            .rotationEffect(.degrees(148))
+            .padding(arcInset)
+            Canvas { context, size in
+                let fontSize = size.height * 0.38
+                let standard = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .semibold)
+                let font = standard.fontDescriptor.withDesign(.rounded)
+                    .flatMap { NSFont(descriptor: $0, size: fontSize) } ?? standard
+                let line = CTLineCreateWithAttributedString(NSAttributedString(string: quotaText, attributes: [
+                    .font: font, .foregroundColor: NSColor.white
+                ]))
+                let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+                guard !ink.isEmpty else { return }
+                let scale = min(1, size.width * 0.66 / ink.width)
+                context.withCGContext { graphics in
+                    graphics.translateBy(x: size.width / 2, y: size.height / 2)
+                    graphics.scaleBy(x: scale, y: -scale)
+                    graphics.textMatrix = .identity
+                    graphics.textPosition = CGPoint(x: -ink.midX, y: -ink.midY)
+                    CTLineDraw(line, graphics)
+                }
+            }
+            ForEach(0..<4) { index in
+                let angle = (129 - 26 * Double(index)) * .pi / 180
+                let fill = min(1, max(0, cpuHeadroom * 4 - Double(index)))
+                Circle().fill(.white.opacity(0.22 + fill * 0.78))
+                    .frame(width: diameter * 0.10, height: diameter * 0.10)
+                    .position(x: center + arcRadius * cos(angle), y: center + arcRadius * sin(angle))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+        .foregroundStyle(.white)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: cpuHeadroom)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: ramHeadroom)
+        .accessibilityHidden(true)
+    }
 }
