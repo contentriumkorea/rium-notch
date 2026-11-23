@@ -1536,6 +1536,7 @@ func menuBarSurfaceIsLight(_ appearance: NSAppearance?) -> Bool {
 }
 
 final class Model: ObservableObject {
+    let tethering = SKTUsageController()
     let assistant: AssistantController
     private let assistantSpeech = AssistantSpeech()
     private var assistantSpeechChunks: [String: AssistantSpeechChunks] = [:]
@@ -2078,7 +2079,7 @@ final class Model: ObservableObject {
     private var compactExternalAgentSideWidth: CGFloat? {
         if let peek = visibleAgentTransientPeek, visibleFocusAlarmPeek == nil {
             switch peek.kind {
-            case .running: return usageTrackingEnabled ? notchStatusCharacterSize : CollapsedAgentPulse.badgeWidth
+            case .running: return notchStatusCharacterSize
             case .completed: return notchStatusCharacterSize
             case .failed, .interrupted, .stalled: return agentPeekLabelWidth
             }
@@ -2087,7 +2088,7 @@ final class Model: ObservableObject {
               !receivingFile, receivedFilePeek == nil, shortcutPeek == nil, caseKeyPeek == nil,
               batteryPeek == nil, visibleTimerAlarmTitle == nil, let agent = collapsedExternalAgent,
               agentIsRunning(agent.state) || agentNeedsAttention(agent.state) else { return nil }
-        return usageTrackingEnabled && agentIsRunning(agent.state) ? notchStatusCharacterSize : CollapsedAgentPulse.badgeWidth
+        return notchStatusCharacterSize
     }
     private func compactStatusWidth(side: CGFloat) -> CGFloat {
         let gap = cameraExclusion > 0 ? cameraExclusion + 8 : 0
@@ -2136,7 +2137,8 @@ final class Model: ObservableObject {
     }
     var currentNotchOutlineSize: CGSize {
         if usesPhysicalNotchOutline {
-            return CGSize(width: min(displayWidth, cameraExclusion), height: cameraHeight)
+            return CGSize(width: min(displayWidth, NotchCorners.physicalOutlineWidth(cameraWidth: cameraExclusion)),
+                          height: cameraHeight)
         }
         var outline = notchOutlineSize(content: currentNotchSize, expanded: expanded, screenWidth: displayWidth)
         if !expanded, floatingIslandPlacement == nil, cameraExclusion > 0, cameraHeight > 0, outline.height == cameraHeight {
@@ -2153,7 +2155,11 @@ final class Model: ObservableObject {
         let status = showsCompactMonitor || showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || timerState != 0 || !volumeOverlay.isEmpty
         return notchShellState(expanded: expanded, detail: hasVisibleDetailPeek, status: status, media: mediaLightPlaying, shelf: shelfRevealVisible)
     }
-    var currentNotchCorners: NotchCorners { usesPhysicalNotchOutline ? .physical : notchCorners(for: currentNotchShellState) }
+    var currentNotchCorners: NotchCorners {
+        if floatingIslandPlacement == nil && cameraExclusion > 0 && cameraHeight > 0 &&
+            ((!expanded && !shelfRevealVisible) || (expanded && !compactStatusVisible)) { return .physical }
+        return notchCorners(for: currentNotchShellState)
+    }
     @Published var mediaTitle = "재생 정보를 불러오세요"
     @Published var mediaArtist = ""
     @Published var mediaAlbum = ""
@@ -2426,6 +2432,7 @@ final class Model: ObservableObject {
         }
         teleprompter.onEditingChange = { [weak self] editing in self?.setPromptEditing(editing) }
         guard startServices else { return }
+        tethering.startIfConnected()
         agenda.onAdded = { [weak self] addition in
             switch addition {
             case .event: self?.showAgendaLight(.calendarAdded)
@@ -6394,211 +6401,6 @@ struct CollapsedAgentFace: View {
     }
 }
 
-struct CollapsedAgentPulse: View {
-    static let badgeWidth: CGFloat = 60
-    let active: Bool
-    let waiting: Bool
-    let activity: String
-    let agentID: String
-    let toolEvents: [AgentToolEvent]
-    let toolObservedAt: TimeInterval?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private struct Token: Identifiable { let id: UInt64; let width: CGFloat; let color: Color; let accent: Bool }
-    @State private var tokens: [Token] = []
-    @State private var sequence: UInt64 = 0
-    @State private var sessionSeed = UInt64.random(in: UInt64.min...UInt64.max)
-    @State private var lastAction: TimeInterval = 0
-    @State private var actionTask: Task<Void, Never>?
-    @State private var actionQueue: [(Int, Color, Bool, TimeInterval)] = []
-    @State private var recentEventMarkers: [UInt64] = []
-    @State private var cursorStarted: TimeInterval = 0
-    init(active: Bool, waiting: Bool, activity: String, agentID: String, toolEvents: [AgentToolEvent], toolObservedAt: TimeInterval? = nil) {
-        self.active = active; self.waiting = waiting; self.activity = activity; self.agentID = agentID; self.toolEvents = toolEvents
-        self.toolObservedAt = toolObservedAt
-    }
-    private func showRecentAction() {
-        guard let observed = toolObservedAt, agentToolBurstIsFresh(queuedAt: observed, now: ProcessInfo.processInfo.systemUptime),
-              let last = toolEvents.last else { return }
-        showAction(last.activity, kind: last.kind, observedAt: observed)
-    }
-    private var seed: UInt64 {
-        agentID.utf8.reduce(sessionSeed) { ($0 ^ UInt64($1)) &* 1_099_511_628_211 }
-    }
-    private func sample() -> [Double] {
-        var values = [Double](repeating: 0, count: 4)
-        let result = values.withUnsafeMutableBufferPointer { rustAgentTokenSample(seed, sequence, $0.baseAddress) }
-        return result == 0 ? values : [1.45, 4, 5, 3]
-    }
-    private func append(width: Double, color: Color, accent: Bool = false) {
-        sequence &+= 1
-        let token = Token(id: sequence, width: CGFloat(width), color: color, accent: accent)
-        let update = {
-            self.tokens.append(token)
-            if self.tokens.count > 16 { self.tokens.removeFirst(self.tokens.count - 16) }
-        }
-        if !reduceMotion {
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.62), update)
-        } else {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction, update)
-        }
-    }
-    private func showAction(_ action: String, kind: Int32? = nil, observedAt: TimeInterval? = nil) {
-        guard active, !waiting else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        let queuedAt = observedAt ?? now
-        guard agentToolBurstIsFresh(queuedAt: queuedAt, now: now) else { return }
-        lastAction = now
-        // shortcut: a busy display retains the newest 16 bursts; revisit after event-rate measurement.
-        if actionQueue.count == 16 { actionQueue.removeFirst() }
-        let count = Int(sample()[3]); sequence &+= 1
-        actionQueue.append((count, tint(for: action, kind: kind), reduceMotion, queuedAt))
-        guard actionTask == nil else { return }
-        actionTask = Task { @MainActor in
-            while !actionQueue.isEmpty && !Task.isCancelled {
-                let (count, actionTint, immediate, queuedAt) = actionQueue.removeFirst()
-                guard agentToolBurstIsFresh(queuedAt: queuedAt, now: ProcessInfo.processInfo.systemUptime) else { continue }
-                for index in 0..<count {
-                    if index > 0 && !immediate {
-                        let remaining = count - index + actionQueue.reduce(0) { $0 + $1.0 }
-                        let delay = agentToolBurstDelay(queuedAt: queuedAt, now: ProcessInfo.processInfo.systemUptime, tokensRemaining: remaining)
-                        do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { return }
-                    }
-                    guard !Task.isCancelled else { return }
-                    let now = ProcessInfo.processInfo.systemUptime
-                    if !agentToolBurstIsFresh(queuedAt: queuedAt, now: now) { break }
-                    lastAction = now
-                    append(width: sample()[2], color: index == 0 ? actionTint : .white, accent: index == 0)
-                }
-            }
-            actionTask = nil
-        }
-    }
-    private func tint(for action: String, kind: Int32?) -> Color {
-        let bytes = Array(action.utf8)
-        var rgb = [Double](repeating: 1, count: 3)
-        let status = rgb.withUnsafeMutableBufferPointer { output in
-            if let kind = kind { return rustAgentTokenKindColor(kind, output.baseAddress) }
-            return bytes.withUnsafeBufferPointer { rustAgentTokenColor($0.baseAddress, $0.count, output.baseAddress) }
-        }
-        return status == 0 ? Color(red: rgb[0], green: rgb[1], blue: rgb[2]) : .white
-    }
-    var body: some View {
-        let pixelStyle = false
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || !active)) { _ in
-            let time = reduceMotion || !active ? 0 : ProcessInfo.processInfo.systemUptime
-            if pixelStyle {
-            Canvas { context, size in
-                let lineWidth = min(CGFloat(52), size.width)
-                let lineLeft = (size.width - lineWidth) / 2
-                let widths = tokens.map { max(2, ($0.width / 2).rounded() * 2) }
-                let total = widths.reduce(CGFloat(2)) { $0 + $1 + 2 }
-                var x = lineLeft + lineWidth - total
-                let baseline = (size.height - 6) / 2 + 6
-                context.clip(to: Path(CGRect(x: lineLeft, y: 0, width: lineWidth, height: size.height)))
-                for (token, width) in zip(tokens, widths) {
-                    let rect = CGRect(x: x, y: baseline - 4, width: width, height: 4)
-                    context.fill(Path(rect), with: .color(token.color.opacity(token.accent ? 1 : 0.85)))
-                    x += width + 2
-                }
-                let cursor = reduceMotion || Int(time * 2) % 2 == 0 ? 1.0 : 0.0
-                context.fill(Path(CGRect(x: x, y: baseline - 6, width: 2, height: 6)), with: .color(.white.opacity(cursor)))
-            }
-            } else {
-                let elapsed = reduceMotion || !active ? 0 : max(0, time - cursorStarted)
-                let cursorOpacity = rustAgentCursorOpacity(elapsed, reduceMotion || !active ? 1 : 0)
-                HStack(alignment: .center, spacing: 1.4) {
-                    ForEach(tokens) { token in
-                        Capsule().fill(token.color)
-                            .frame(width: token.width, height: 4.2)
-                            .opacity(token.accent ? 1 : 0.85)
-                            .shadow(color: token.accent ? token.color.opacity(0.8) : .clear, radius: 1.5)
-                            .transition(.scale(scale: 0.1).combined(with: .opacity))
-                    }
-                    Capsule().fill(.white)
-                        .frame(width: 2.2, height: 6.4)
-                        .opacity(cursorOpacity)
-                }
-                .fixedSize()
-                .frame(width: 50, alignment: .trailing)
-                .clipped()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .onAppear {
-            cursorStarted = ProcessInfo.processInfo.systemUptime
-            _ = unseenAgentToolEvents(markers: &recentEventMarkers, current: toolEvents)
-            guard tokens.isEmpty else { return }
-            showRecentAction()
-        }
-        .onChange(of: toolEvents) { previous, current in
-            if agentToolHistoryChanged(previous: previous.last, current: current.last) { recentEventMarkers.removeAll() }
-            let fresh = unseenAgentToolEvents(markers: &recentEventMarkers, current: current)
-            if let observed = toolObservedAt {
-                for event in actionableAgentToolEvents(previous: previous, current: current, unseen: fresh) {
-                    showAction(event.activity, kind: event.kind, observedAt: observed)
-                }
-            }
-        }
-        .onChange(of: activity) { _, current in
-            if toolEvents.isEmpty && !current.isEmpty { showAction(current) }
-        }
-        .onChange(of: waiting) { _, isWaiting in
-            if isWaiting {
-                actionTask?.cancel(); actionTask = nil; actionQueue.removeAll()
-            }
-        }
-        .onChange(of: active) { _, isActive in
-            if !isActive {
-                actionTask?.cancel(); actionTask = nil; actionQueue.removeAll()
-            }
-        }
-        .onDisappear { actionTask?.cancel(); actionTask = nil; actionQueue.removeAll() }
-        .task(id: agentPulseCanAnimate(active: active, waiting: waiting, reduceMotion: reduceMotion)) {
-            while !Task.isCancelled && agentPulseCanAnimate(active: active, waiting: waiting, reduceMotion: reduceMotion) {
-                let delay = sample()[0]
-                do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { return }
-                guard !Task.isCancelled else { return }
-                if ProcessInfo.processInfo.systemUptime - lastAction > 1 {
-                    append(width: sample()[1], color: .white)
-                } else {
-                    // Advance the next idle delay even while an action is active.
-                    sequence &+= 1
-                }
-            }
-        }
-        .frame(width: Self.badgeWidth, height: 22)
-        .background {
-          if pixelStyle {
-            Canvas { context, _ in
-                let upper = Color(red: 0.11, green: 0.17, blue: 0.49)
-                let lower = Color(red: 0.02, green: 0.03, blue: 0.155)
-                for row in 0..<11 {
-                    for column in 0..<30 {
-                        if (row == 0 || row == 10) && (column == 0 || column == 29) { continue }
-                        let edge = row == 0 || row == 10 || column == 0 || column == 29
-                            || ((row == 1 || row == 9) && (column == 1 || column == 28))
-                        let color = edge ? Color.black : (row <= 4 ? upper : lower)
-                        context.fill(Path(CGRect(x: CGFloat(column * 2), y: CGFloat(row * 2), width: 2, height: 2)), with: .color(color))
-                    }
-                }
-                context.fill(Path(CGRect(x: 6, y: 4, width: 28, height: 2)), with: .color(.white.opacity(0.16)))
-            }
-          } else {
-            // shortcut: gradient angle and highlight placement need reference-frame comparison.
-            RoundedRectangle(cornerRadius: 9)
-                .fill(LinearGradient(colors: [Color(red: 0.11, green: 0.17, blue: 0.49), Color(red: 0.02, green: 0.03, blue: 0.155)], startPoint: .top, endPoint: .bottom))
-                .overlay(alignment: .top) {
-                    Capsule().fill(.white.opacity(0.16)).frame(width: 34, height: 1.4).padding(.top, 3)
-                }
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.black.opacity(0.5), lineWidth: 0.8))
-          }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
 struct CollapsedMusicWave: View {
     let tint: NSColor
     @ObservedObject var spectrum: SystemAudioSpectrum
@@ -6672,19 +6474,19 @@ private struct SystemLevelBadge: View {
             Image(systemName: symbol)
                 .font(.system(size: 9, weight: .medium))
                 .fixedSize()
-                .frame(width: 13)
+                .frame(width: 12)
             if let level {
                 Text(String(level))
                     .monospacedDigit()
                     .fixedSize()
-                    .frame(width: 22, alignment: .trailing)
+                    .frame(width: 19, alignment: .trailing)
                 Text("%").fixedSize().frame(width: 9, alignment: .trailing)
             } else {
                 Spacer(minLength: 0)
             }
         }
         .font(.system(size: 9, weight: .semibold))
-        .frame(width: Self.width)
+        .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
     }
@@ -6698,6 +6500,7 @@ private struct NotchToolbarControlsAnchor: PreferenceKey {
 }
 
 struct NotchView: View {
+    private static let tetheringButtonWidth: CGFloat = 126
     private static let compactStatusButtonWidth: CGFloat = 40
     private static let moreButtonWidth: CGFloat = 48
 
@@ -6827,27 +6630,17 @@ struct NotchView: View {
         } else if model.visibleSystemOverlay {
             SystemLevelBadge(symbol: model.overlaySymbol, level: model.controlOverlayLevel, label: model.volumeOverlay)
         } else if model.showsCollapsedAgent, let agent = model.collapsedExternalAgent {
-            if agent.state != "완료" {
+            if agent.state != "완료" && model.usageTrackingEnabled && agentIsRunning(agent.state) {
                 Button(action: { model.select(.agents); model.expanded = true }) {
-                    if model.usageTrackingEnabled && agentIsRunning(agent.state) {
-                        CompactMonitorBadge(model: model)
-                    } else {
-                        CollapsedAgentPulse(active: agentIsRunning(agent.state), waiting: agentNeedsAttention(agent.state), activity: agent.activity, agentID: agent.id, toolEvents: agent.toolEvents, toolObservedAt: agent.toolObservedAt).id(agent.sessionKey)
-                    }
+                    CompactMonitorBadge(model: model)
                 }.buttonStyle(.plain)
                     .accessibilityLabel(model.usageTrackingEnabled && agentIsRunning(agent.state) ? "\(agent.providerName) \(agent.state), \(model.monitorSummary)" : "\(agent.providerName) \(agent.state)")
                     .help(model.usageTrackingEnabled && agentIsRunning(agent.state) ? model.monitorSummary : "에이전트 활동 열기")
             }
         } else if model.assistantIndicator != .off || model.assistantFinishing || model.assistantListening || model.assistantSpeaking {
-            if !model.assistantJustCompleted {
+            if !model.assistantJustCompleted && model.usageTrackingEnabled && model.assistantIndicator == .working {
                 Button(action: { model.select(.assistant); model.expanded = true }) {
-                    if model.usageTrackingEnabled && model.assistantIndicator == .working {
-                        CompactMonitorBadge(model: model)
-                    } else {
-                        CollapsedAgentPulse(active: model.assistantIndicator == .working,
-                                        waiting: model.assistantIndicator == .approval || model.assistantIndicator == .question,
-                                        activity: "", agentID: model.assistantAnimationID, toolEvents: []).id(model.assistantAnimationID)
-                    }
+                    CompactMonitorBadge(model: model)
                 }.buttonStyle(.plain).accessibilityLabel("AI 대화 \(assistantStateLabel)").help("AI 대화 열기")
             }
         } else if let date = model.weatherPeek {
@@ -7003,7 +6796,7 @@ struct NotchView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Color.clear.frame(width: Self.compactStatusButtonWidth + Self.moreButtonWidth, height: 1)
+                    Color.clear.frame(width: Self.tetheringButtonWidth + Self.compactStatusButtonWidth + Self.moreButtonWidth, height: 1)
                         .anchorPreference(key: NotchToolbarControlsAnchor.self, value: .bounds) { $0 }
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
@@ -7157,6 +6950,8 @@ struct NotchView: View {
                 GeometryReader { geometry in
                     let bounds = geometry[anchor]
                     HStack(spacing: 0) {
+                        SKTUsageButton(controller: model.tethering)
+                            .frame(width: Self.tetheringButtonWidth, height: 52)
                         Button { model.toggleCompactStatusFromPanel() } label: {
                             NotchSilhouette(corners: NotchCorners(bottom: 2, shoulder: 2.5))
                                 .fill(.white.opacity(model.compactStatusVisible ? 1 : 0.55))
@@ -7781,8 +7576,13 @@ struct NotchCorners: Equatable {
     var bottom: CGFloat
     var shoulder: CGFloat
     static let legacy = NotchCorners(bottom: 16, shoulder: 20)
-    // AppKit reports the bounding box. Approximate the corner profile from Apple's front view.
-    static let physical = NotchCorners(bottom: 10, shoulder: 1.5)
+    // Equal radii make each upper shoulder a rotated copy of its lower corner.
+    static let physical = NotchCorners(bottom: 10, shoulder: 10)
+
+    static func physicalOutlineWidth(cameraWidth: CGFloat) -> CGFloat {
+        // The path places its straight sides one shoulder in from each end.
+        cameraWidth + 2 * physical.shoulder
+    }
 }
 
 func notchCorners(for state: Int32) -> NotchCorners {
@@ -8508,9 +8308,7 @@ private struct AgentTransientPreview: View {
                         } else if showMonitor {
                             CompactMonitorBadge(model: model)
                         } else if peek.kind == .running {
-                            CollapsedAgentPulse(active: true, waiting: false,
-                                                activity: agent.activity, agentID: agent.id, toolEvents: agent.toolEvents, toolObservedAt: agent.toolObservedAt)
-                                .id(agent.sessionKey)
+                            Color.clear.accessibilityHidden(true)
                         } else {
                             Text("\(agent.providerName) \(label)").font(.system(size: 11, weight: .medium))
                                 .lineLimit(1).minimumScaleFactor(0.7)
@@ -11121,7 +10919,30 @@ private func publishedReceiveFixture(_ file: URL) -> Progress {
     return progress
 }
 
-if CommandLine.arguments.contains("--self-test-helper-pipe") {
+if CommandLine.arguments.contains("--self-test-skt-usage") {
+    let row = ["통합공유 데이터 80GB", "50.52GB", "29.48GB", "-"]
+    precondition(SKTSharedData.parse(rows: [row]) == SKTSharedData(remaining: "29.48GB", used: "50.52GB", allowance: "80GB"))
+    precondition(SKTSharedData.parse(rows: [["데이터통화 무제한", "50GB", "무제한"]]) == nil)
+    precondition(SKTSharedData.parse(rows: [row, row]) == nil)
+    precondition(SKTSharedData.parse(rows: [["통합공유 데이터 80GB", "50GB", "무제한"]]) == nil)
+    let cookie = HTTPCookie(properties: [.domain: ".tworld.co.kr", .path: "/", .name: "fixture", .value: "test", .secure: "TRUE"])!
+    let unrelated = HTTPCookie(properties: [.domain: "not-tworld.co.kr", .path: "/", .name: "fixture", .value: "test"])!
+    let expired = HTTPCookie(properties: [.domain: ".tworld.co.kr", .path: "/", .name: "expired", .value: "test", .expires: Date(timeIntervalSince1970: 1)])!
+    let expiry = Date().addingTimeInterval(600)
+    let limited = HTTPCookie(properties: [.domain: ".skt-id.co.kr", .path: "/", .name: "limited", .value: "test", .expires: expiry])!
+    let cookieData = SKTSessionStore.encode([cookie, unrelated, expired])!
+    precondition(SKTSessionStore.decode(cookieData).map(\.name) == ["fixture"])
+    let limitedData = SKTSessionStore.encode([limited])!
+    precondition(abs(SKTSessionStore.decode(limitedData).first!.expiresDate!.timeIntervalSince(expiry)) < 1)
+    precondition(!SKTSessionStore.belongsToSKT("tworld.co.kr.example.com"))
+    precondition(SKTSessionStore.decode(Data("invalid".utf8)).isEmpty)
+    let testService = "app.rium.notch.skt-test.\(UUID().uuidString)"
+    precondition(SKTSessionStore.save([cookie], service: testService))
+    precondition(SKTSessionStore.load(service: testService).map(\.name) == ["fixture"])
+    SKTSessionStore.clear(service: testService)
+    precondition(SKTSessionStore.load(service: testService).isEmpty)
+    print("SKT shared data parser self-test passed")
+} else if CommandLine.arguments.contains("--self-test-helper-pipe") {
     let pipe = Pipe()
     guard suppressBrokenPipeSignal(pipe.fileHandleForWriting) else { fatalError("pipe signal setup failed") }
     try pipe.fileHandleForReading.close()
@@ -11837,7 +11658,7 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     foldModel.cameraHeight = 32
     let running = AgentActivity(id: "running-fold", project: "fixture", state: "작업 중", activity: "")
     foldModel.agentItems = [running]
-    precondition(foldModel.collapsedNotchSize == CGSize(width: 365, height: 32))
+    precondition(foldModel.collapsedNotchSize == CGSize(width: 285, height: 32))
     foldModel.clipboardEnabled = true
     let preCopyOutline = foldModel.currentNotchOutlineSize
     foldModel.showClipboardPeek(.copied, content: .text("fixture"))
@@ -11845,7 +11666,7 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     foldModel.toggleClipboard()
     precondition(foldModel.currentNotchOutlineSize == preCopyOutline && !foldModel.foldingDetailToStatus)
     foldModel.showAgentTransientPeek(running, kind: .running)
-    precondition(foldModel.visibleAgentTransientPeek != nil && foldModel.collapsedNotchSize.width == 365)
+    precondition(foldModel.visibleAgentTransientPeek != nil && foldModel.collapsedNotchSize.width == 285)
     foldModel.setUsageTrackingEnabled(true)
     precondition(foldModel.collapsedNotchSize.width == 285)
     let approvalModel = Model(startServices: false)
@@ -12179,7 +12000,7 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     clickNotch(at: compactStatusButtonX, topDistance: 47)
     precondition(!monitor.expanded && !monitor.compactStatusVisible && monitor.hoverEnabled,
                  "the toolbar switch did not hide compact status while preserving hover")
-    precondition(monitor.currentNotchOutlineSize == CGSize(width: 185, height: 32) &&
+    precondition(monitor.currentNotchOutlineSize == CGSize(width: 205, height: 32) &&
                  monitor.currentNotchShellState == 3 && monitor.currentNotchCorners == .physical)
     monitor.agentItems = []
     precondition(!monitor.showsCompactMonitor && monitor.collapsedNotchSize.width == 185)
@@ -12564,21 +12385,37 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     precondition(bareCorners == NotchCorners(bottom: 8, shoulder: 12))
     let idleGeometry = Model(startServices: false)
     idleGeometry.displayWidth = 1200; idleGeometry.cameraExclusion = 185; idleGeometry.cameraHeight = 32
-    precondition(idleGeometry.currentNotchShellState == 3 && idleGeometry.currentNotchOutlineSize == CGSize(width: 185, height: 32))
+    precondition(idleGeometry.currentNotchShellState == 3 && idleGeometry.currentNotchSize == CGSize(width: 185, height: 32))
+    precondition(idleGeometry.currentNotchOutlineSize == CGSize(width: 205, height: 32))
     precondition(idleGeometry.currentNotchCorners == .physical)
     let physicalRect = CGRect(origin: .zero, size: idleGeometry.currentNotchOutlineSize)
     let physicalSilhouette = NotchSilhouette(corners: .physical).path(in: physicalRect)
     precondition(physicalSilhouette.boundingRect == physicalRect)
-    precondition(physicalSilhouette.contains(CGPoint(x: 2, y: 12)) &&
-                 physicalSilhouette.contains(CGPoint(x: 13, y: 31.5)) &&
-                 !physicalSilhouette.contains(CGPoint(x: 2, y: 31.5)))
+    let sides = physicalRect.insetBy(dx: NotchCorners.physical.shoulder, dy: 0)
+    let shoulderMidX = sides.minX / 2
+    precondition(sides.width == idleGeometry.cameraExclusion &&
+                 NotchCorners.physical.shoulder == NotchCorners.physical.bottom)
+    precondition(physicalSilhouette.contains(CGPoint(x: shoulderMidX, y: 0.2)) &&
+                 physicalSilhouette.contains(CGPoint(x: physicalRect.maxX - shoulderMidX, y: 0.2)))
+    precondition(physicalSilhouette.contains(CGPoint(x: sides.minX + 0.1, y: 12)) &&
+                 physicalSilhouette.contains(CGPoint(x: sides.maxX - 0.1, y: 12)) &&
+                 !physicalSilhouette.contains(CGPoint(x: sides.minX - 0.1, y: 12)) &&
+                 !physicalSilhouette.contains(CGPoint(x: sides.maxX + 0.1, y: 12)))
+    precondition(physicalSilhouette.contains(CGPoint(x: sides.minX + 12, y: 31.5)) &&
+                 !physicalSilhouette.contains(CGPoint(x: sides.minX + 0.1, y: 31.5)))
     idleGeometry.setUsageTrackingEnabled(true)
-    precondition(idleGeometry.currentNotchShellState == 1 && idleGeometry.currentNotchCorners == .legacy)
+    precondition(idleGeometry.currentNotchShellState == 1 && idleGeometry.currentNotchCorners == .physical)
     let idleOutline = idleGeometry.currentNotchOutlineSize
     precondition(idleOutline == CGSize(width: 285, height: 32.5))
     idleGeometry.agentItems = [AgentActivity(id: "outline", project: "fixture", state: "작업 중", activity: "")]
-    precondition(idleGeometry.currentNotchOutlineSize == idleOutline && idleGeometry.currentNotchCorners == .legacy)
+    precondition(idleGeometry.currentNotchOutlineSize == idleOutline && idleGeometry.currentNotchCorners == .physical)
     idleGeometry.agentItems = []
+    let brightnessGeometry = Model(startServices: false)
+    brightnessGeometry.displayWidth = 1200; brightnessGeometry.cameraExclusion = 185; brightnessGeometry.cameraHeight = 32
+    brightnessGeometry.recordBrightness(display: 1, percent: 40)
+    brightnessGeometry.recordBrightness(display: 1, percent: 42)
+    precondition(brightnessGeometry.showsCompactControlOverlay && brightnessGeometry.currentNotchSize.width == 325 &&
+                 brightnessGeometry.currentNotchCorners == .physical)
     idleGeometry.expanded = true
     precondition(idleGeometry.currentNotchOutlineSize.height == idleGeometry.expandedNotchSize.height)
     idleGeometry.expanded = false
@@ -12586,6 +12423,11 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     precondition(idleGeometry.currentNotchOutlineSize.height == idleGeometry.currentNotchSize.height)
     precondition(idleGeometry.currentNotchCorners == .legacy)
     precondition(expandedCorners == NotchCorners(bottom: 28, shoulder: 36))
+    let lightOnlyGeometry = Model(startServices: false)
+    lightOnlyGeometry.cameraExclusion = 185; lightOnlyGeometry.cameraHeight = 32
+    lightOnlyGeometry.toggleCompactStatusFromPanel()
+    lightOnlyGeometry.expanded = true
+    precondition(lightOnlyGeometry.currentNotchCorners == .physical)
     precondition(notchGeometryClose(targetSize, corners: bareCorners, targetSize: targetSize, targetCorners: bareCorners, tolerance: 0.2))
     precondition(!notchGeometryClose(intermediateSize, corners: bareCorners, targetSize: targetSize, targetCorners: bareCorners, tolerance: 0.2))
     precondition(!notchGeometryClose(targetSize, corners: bareCorners, targetSize: targetSize, targetCorners: expandedCorners, tolerance: 0.2))

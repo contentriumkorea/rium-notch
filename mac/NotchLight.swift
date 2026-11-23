@@ -956,10 +956,11 @@ struct PhysicalNotchExclusion: ViewModifier {
     func body(content: Content) -> some View {
         if width.isFinite && height.isFinite && width > 0 && height > 0 {
             // Approximate the fixed hardware cutout independently of the app's shoulder.
+            let outlineWidth = NotchCorners.physicalOutlineWidth(cameraWidth: width)
             content
-                .mask(OutsideNotchMask(notchWidth: width, notchHeight: height, corners: .physical)
+                .mask(OutsideNotchMask(notchWidth: outlineWidth, notchHeight: height, corners: .physical)
                     .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
-                .mask(OutsideNotchEdgeMask(notchWidth: width, notchHeight: height, corners: .physical)
+                .mask(OutsideNotchEdgeMask(notchWidth: outlineWidth, notchHeight: height, corners: .physical)
                     .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
         } else {
             content
@@ -2863,6 +2864,11 @@ struct AnimatedNotchAmbientLight: View {
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: mode)
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: agentVariant)
         .opacity(profile.intensity)
+        let physicalOutline = CGSize(width: NotchCorners.physicalOutlineWidth(cameraWidth: model.cameraExclusion),
+                                     height: model.cameraHeight)
+        let shellCoversPhysicalNotch = behindNotch && model.cameraExclusion > 0 && model.cameraHeight > 0 &&
+            notchGeometryClose(notchSize, corners: corners, targetSize: physicalOutline,
+                               targetCorners: .physical, tolerance: 0.01)
         Group {
             if behindNotch {
                 lighting
@@ -2871,7 +2877,8 @@ struct AnimatedNotchAmbientLight: View {
                     .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
             }
         }
-        .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
+        .modifier(PhysicalNotchExclusion(width: shellCoversPhysicalNotch ? 0 : model.cameraExclusion,
+                                         height: model.cameraHeight))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
