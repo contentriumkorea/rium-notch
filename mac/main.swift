@@ -1664,15 +1664,15 @@ final class Model: ObservableObject {
     }
     var floatingIslandGeometry: FloatingIslandScreenGeometry? {
         guard let placement = floatingIslandPlacement else { return nil }
-        let detail = hasVisibleDetailPeek
+        let detail = compactStatusVisible && hasVisibleDetailPeek
         let status = showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || !volumeOverlay.isEmpty
         // shortcut: the original branches are known, but their status mapping needs comparison.
-        let compactMode: Int32 = visibleFocusAlarmPeek != nil ? 6 : detail ? 2 : status ? 1 : timerState != 0 && mediaLightPlaying ? 5 : timerState != 0 ? 3 : mediaLightPlaying ? 4 : 0
+        let compactMode: Int32 = !compactStatusVisible ? 0 : visibleFocusAlarmPeek != nil ? 6 : detail ? 2 : status ? 1 : timerState != 0 && mediaLightPlaying ? 5 : timerState != 0 ? 3 : mediaLightPlaying ? 4 : 0
         var size = expanded ? currentNotchOutlineSize : (floatingIslandCompactSize(screenWidth: placement.bounds.screen.width,
             menuHeight: placement.bounds.menuHeight, mode: compactMode) ?? CGSize(width: 96, height: 24))
-        if !expanded && showsCompactControlOverlay {
+        if !expanded && compactStatusVisible && showsCompactControlOverlay {
             size.width = min(size.width, 2 * (SystemLevelBadge.width + 8))
-        } else if !expanded, let side = compactExternalAgentSideWidth {
+        } else if !expanded, compactStatusVisible, let side = compactExternalAgentSideWidth {
             size.width = min(size.width, 2 * (side + 8))
         }
         return FloatingIslandScreenGeometry(bounds: placement.bounds, anchor: placement.anchor, size: size,
@@ -1767,6 +1767,7 @@ final class Model: ObservableObject {
     @Published private(set) var preferredDisplayKey: String?
     @Published private(set) var availableDisplays: [NotchDisplayChoice] = []
     @Published var hoverEnabled = true
+    @Published private(set) var compactStatusVisible = true
     @Published var autoHideEnabled = true
     @Published var autoHideDelay = 0.4
     @Published private(set) var agentSwitcherVisible = false
@@ -1795,8 +1796,8 @@ final class Model: ObservableObject {
             (fileDragActive || shelfDropPending || !shelfConfirmedFiles.isEmpty || shelfConfirmationMessage != nil)
     }
     var hoverExpansionBlocked: Bool {
-        !expanded && (shelfRevealVisible || dictationDisplayActive || visiblePermissionPeek != nil ||
-                      visibleSystemNotificationPeek != nil || visibleFocusAlarmPeek != nil)
+        !expanded && (shelfRevealVisible || dictationDisplayActive ||
+                      (compactStatusVisible && (visiblePermissionPeek != nil || visibleSystemNotificationPeek != nil || visibleFocusAlarmPeek != nil)))
     }
     @Published var lightCue: NotchLightCue?
     @Published var menuBarIsLight = false
@@ -1964,7 +1965,7 @@ final class Model: ObservableObject {
     }
     var collapsedIsIdle: Bool { !showsCollapsedAgent && !dictationDisplayActive && !receivingFile && receivedFilePeek == nil && shortcutPeek == nil && caseKeyPeek == nil && batteryPeek == nil && weatherPeek == nil && !visibleAirDropPeek && visibleTrackSkipPeek == nil && visibleSystemNotificationPeek == nil && visibleFocusAlarmPeek == nil && timerState == 0 && !mediaLightPlaying && volumeOverlay.isEmpty }
     var showsCompactMonitor: Bool {
-        usageTrackingEnabled && collapsedIsIdle && !shelfRevealVisible && visibleAgentTransientPeek == nil &&
+        compactStatusVisible && usageTrackingEnabled && collapsedIsIdle && !shelfRevealVisible && visibleAgentTransientPeek == nil &&
         visiblePermissionPeek == nil && !visibleAssistantPeek && assistantIndicator == .off &&
         !assistantFinishing && !assistantListening && !assistantSpeaking
     }
@@ -2093,6 +2094,10 @@ final class Model: ObservableObject {
         return max(cameraExclusion > 0 ? cameraExclusion : 185, gap + 2 * (collapsedHeaderSideInset + side))
     }
     var collapsedNotchSize: CGSize {
+        if !compactStatusVisible && !shelfRevealVisible {
+            return calculateCollapsedNotchSize(cameraWidth: cameraExclusion, cameraHeight: cameraHeight,
+                                               screenWidth: displayWidth, agent: false, timer: false, music: false)
+        }
         var size = calculateCollapsedNotchSize(cameraWidth: cameraExclusion, cameraHeight: cameraHeight, screenWidth: displayWidth,
                            agent: showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || visibleAirDropPeek || visibleTrackSkipPeek != nil || visibleSystemNotificationPeek != nil || !volumeOverlay.isEmpty, timer: timerState != 0, music: mediaLightPlaying,
                            notification: visibleSystemNotificationPeek != nil, focusAlarm: visibleFocusAlarmPeek != nil, shelf: shelfRevealVisible,
@@ -2126,25 +2131,29 @@ final class Model: ObservableObject {
         if expanded { return expandedNotchSize }
         return collapsedNotchSize
     }
+    private var usesPhysicalNotchOutline: Bool {
+        currentNotchShellState == 3 && floatingIslandPlacement == nil && cameraExclusion > 0 && cameraHeight > 0
+    }
     var currentNotchOutlineSize: CGSize {
+        if usesPhysicalNotchOutline {
+            return CGSize(width: min(displayWidth, cameraExclusion), height: cameraHeight)
+        }
         var outline = notchOutlineSize(content: currentNotchSize, expanded: expanded, screenWidth: displayWidth)
         if !expanded, floatingIslandPlacement == nil, cameraExclusion > 0, cameraHeight > 0, outline.height == cameraHeight {
             // Extend the lower edge without shifting the menu-bar alignment or content.
             outline.height += 0.5
         }
-        if currentNotchShellState == 3 && cameraExclusion > 0 {
-            // The outer shoulders need room beside the fixed hardware cutout.
-            let outerWidth = cameraExclusion + 2 * (currentNotchCorners.shoulder + 3)
-            outline.width = min(displayWidth, max(outline.width, outerWidth))
-        }
         return outline
     }
     var currentNotchShellState: Int32 {
+        if !compactStatusVisible {
+            return notchShellState(expanded: expanded, detail: false, status: false, media: false, shelf: shelfRevealVisible)
+        }
         // shortcut: mappings for individual status sources need reference comparison.
         let status = showsCompactMonitor || showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || timerState != 0 || !volumeOverlay.isEmpty
         return notchShellState(expanded: expanded, detail: hasVisibleDetailPeek, status: status, media: mediaLightPlaying, shelf: shelfRevealVisible)
     }
-    var currentNotchCorners: NotchCorners { notchCorners(for: currentNotchShellState) }
+    var currentNotchCorners: NotchCorners { usesPhysicalNotchOutline ? .physical : notchCorners(for: currentNotchShellState) }
     @Published var mediaTitle = "재생 정보를 불러오세요"
     @Published var mediaArtist = ""
     @Published var mediaAlbum = ""
@@ -2413,6 +2422,7 @@ final class Model: ObservableObject {
         if let preferences = self.layoutPreferences {
             preferredDisplayKey = NotchDisplayPreference(defaults: preferences).load()
             hoverEnabled = preferences.object(forKey: "rium.notch.hover") as? Bool ?? true
+            compactStatusVisible = preferences.object(forKey: "rium.notch.compactStatusVisible") as? Bool ?? true
         }
         teleprompter.onEditingChange = { [weak self] editing in self?.setPromptEditing(editing) }
         guard startServices else { return }
@@ -2529,9 +2539,10 @@ final class Model: ObservableObject {
             handleHover(inside)
         }
     }
-    func toggleHoverFromPanel() {
-        setHoverEnabled(!hoverEnabled)
-        if !hoverEnabled {
+    func toggleCompactStatusFromPanel() {
+        compactStatusVisible.toggle()
+        layoutPreferences?.set(compactStatusVisible, forKey: "rium.notch.compactStatusVisible")
+        if !compactStatusVisible {
             finishEditing(pointerInside: true)
             expanded = false
         }
@@ -6687,7 +6698,7 @@ private struct NotchToolbarControlsAnchor: PreferenceKey {
 }
 
 struct NotchView: View {
-    private static let hoverButtonWidth: CGFloat = 40
+    private static let compactStatusButtonWidth: CGFloat = 40
     private static let moreButtonWidth: CGFloat = 48
 
     @ObservedObject var model: Model
@@ -6872,6 +6883,8 @@ struct NotchView: View {
                 // title or monitoring controls inside the expanded notch.
                 Color.clear.frame(height: max(0, (model.cameraHeight > 0 ? model.cameraHeight : 32) - 17))
                     .allowsHitTesting(false).accessibilityHidden(true)
+            } else if !visualExpanded && !model.compactStatusVisible {
+                EmptyView()
             } else if !visualExpanded && (model.shelfRevealVisible || (model.collapsedIsIdle && !model.showsCompactMonitor && model.visibleClipboardPeek == nil) || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil) {
                 EmptyView()
             } else if !visualExpanded && model.showsCompactMonitor {
@@ -6899,6 +6912,8 @@ struct NotchView: View {
                 if !visualExpanded && model.shelfRevealVisible {
                     ShelfDropPreview(model: model)
                         .transition(reduceMotion ? .opacity : .notchBandFold)
+                } else if !model.compactStatusVisible {
+                    EmptyView()
                 } else if !visualExpanded, let peek = model.visiblePermissionPeek {
                     CollapsedPermissionPreview(model: model, voice: model.voiceApproval, item: peek, flightNamespace: characterMotion).id(peek.sessionKey)
                         .transition(reduceMotion ? .opacity : .notchBandFold)
@@ -6988,7 +7003,7 @@ struct NotchView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Color.clear.frame(width: Self.hoverButtonWidth + Self.moreButtonWidth, height: 1)
+                    Color.clear.frame(width: Self.compactStatusButtonWidth + Self.moreButtonWidth, height: 1)
                         .anchorPreference(key: NotchToolbarControlsAnchor.self, value: .bounds) { $0 }
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
@@ -7142,18 +7157,18 @@ struct NotchView: View {
                 GeometryReader { geometry in
                     let bounds = geometry[anchor]
                     HStack(spacing: 0) {
-                        Button { model.toggleHoverFromPanel() } label: {
+                        Button { model.toggleCompactStatusFromPanel() } label: {
                             NotchSilhouette(corners: NotchCorners(bottom: 2, shoulder: 2.5))
-                                .fill(.white.opacity(model.hoverEnabled ? 1 : 0.55))
+                                .fill(.white.opacity(model.compactStatusVisible ? 1 : 0.55))
                                 .frame(width: 16, height: 7)
                                 .frame(width: 28, height: 28)
-                                .background(.white.opacity(model.hoverEnabled ? 0.19 : 0.06), in: Circle())
-                                .frame(width: Self.hoverButtonWidth, height: 52)
+                                .background(.white.opacity(model.compactStatusVisible ? 0.19 : 0.06), in: Circle())
+                                .frame(width: Self.compactStatusButtonWidth, height: 52)
                                 .contentShape(Rectangle())
                         }
-                        .help(model.hoverEnabled ? "자동 펼침 끄기" : "자동 펼침 켜기")
-                        .accessibilityLabel("자동 펼침")
-                        .accessibilityValue(model.hoverEnabled ? "켬" : "끔")
+                        .help(model.compactStatusVisible ? "접힌 노치에 조명만 표시" : "접힌 노치에 상태 아이콘 표시")
+                        .accessibilityLabel("접힌 노치 상태 아이콘")
+                        .accessibilityValue(model.compactStatusVisible ? "표시" : "조명만 표시")
 
                         Button { (NSApp.delegate as? AppDelegate)?.showNotchOptions() } label: {
                             Image(systemName: "ellipsis")
@@ -7766,6 +7781,8 @@ struct NotchCorners: Equatable {
     var bottom: CGFloat
     var shoulder: CGFloat
     static let legacy = NotchCorners(bottom: 16, shoulder: 20)
+    // AppKit reports the bounding box. Approximate the corner profile from Apple's front view.
+    static let physical = NotchCorners(bottom: 10, shoulder: 1.5)
 }
 
 func notchCorners(for state: Int32) -> NotchCorners {
@@ -12157,19 +12174,26 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     precondition(intervals.count >= 8, "expected multiple home redraws during hover")
     print(String(format: "hover geometry: %d changes, median %.1f ms, longest %.1f ms",
                  movingFrames.count, intervals[intervals.count / 2], intervals.last ?? 0))
-    let hoverButtonX = center + monitor.expandedNotchSize.width / 2 - 94
+    let compactStatusButtonX = center + monitor.expandedNotchSize.width / 2 - 94
     monitor.autoHideEnabled = false
-    clickNotch(at: hoverButtonX, topDistance: 47)
-    precondition(!monitor.expanded && !monitor.hoverEnabled, "the toolbar switch did not fold the notch")
+    clickNotch(at: compactStatusButtonX, topDistance: 47)
+    precondition(!monitor.expanded && !monitor.compactStatusVisible && monitor.hoverEnabled,
+                 "the toolbar switch did not hide compact status while preserving hover")
+    precondition(monitor.currentNotchOutlineSize == CGSize(width: 185, height: 32) &&
+                 monitor.currentNotchShellState == 3 && monitor.currentNotchCorners == .physical)
+    monitor.agentItems = []
+    precondition(!monitor.showsCompactMonitor && monitor.collapsedNotchSize.width == 185)
+    monitor.mediaPlaying = true
+    precondition(monitor.mediaLightPlaying && monitor.collapsedNotchSize.width == 185)
+    monitor.mediaPlaying = false
     monitor.handleHover(true)
-    precondition(!monitor.expanded, "hover reopened the notch after disabling it")
-    clickNotch(at: center)
-    precondition(monitor.expanded, "the collapsed notch could not be opened manually")
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.5))
-    clickNotch(at: hoverButtonX, topDistance: 47)
-    precondition(monitor.expanded && monitor.hoverEnabled, "the toolbar switch did not restore hover")
+    precondition(monitor.expanded, "the light-only notch could not open on hover")
+    clickNotch(at: compactStatusButtonX, topDistance: 47)
+    precondition(monitor.expanded && monitor.compactStatusVisible && monitor.hoverEnabled)
+    precondition(monitor.showsCompactMonitor && monitor.collapsedNotchSize.width == 285)
     window.orderOut(nil)
-    print("toolbar switch folds the notch, allows manual opening and restores hover")
+    print("toolbar switch hides compact status, preserves hover and restores the monitor")
     print("idle monitor was available during the closing motion")
     print("click during collapse: wing ignored, compact center reopened with hover disabled")
     print("transients during collapse: media took over once and screenshot shelf was never covered")
@@ -12540,7 +12564,14 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     precondition(bareCorners == NotchCorners(bottom: 8, shoulder: 12))
     let idleGeometry = Model(startServices: false)
     idleGeometry.displayWidth = 1200; idleGeometry.cameraExclusion = 185; idleGeometry.cameraHeight = 32
-    precondition(idleGeometry.currentNotchShellState == 3 && idleGeometry.currentNotchOutlineSize == CGSize(width: 215, height: 32.5))
+    precondition(idleGeometry.currentNotchShellState == 3 && idleGeometry.currentNotchOutlineSize == CGSize(width: 185, height: 32))
+    precondition(idleGeometry.currentNotchCorners == .physical)
+    let physicalRect = CGRect(origin: .zero, size: idleGeometry.currentNotchOutlineSize)
+    let physicalSilhouette = NotchSilhouette(corners: .physical).path(in: physicalRect)
+    precondition(physicalSilhouette.boundingRect == physicalRect)
+    precondition(physicalSilhouette.contains(CGPoint(x: 2, y: 12)) &&
+                 physicalSilhouette.contains(CGPoint(x: 13, y: 31.5)) &&
+                 !physicalSilhouette.contains(CGPoint(x: 2, y: 31.5)))
     idleGeometry.setUsageTrackingEnabled(true)
     precondition(idleGeometry.currentNotchShellState == 1 && idleGeometry.currentNotchCorners == .legacy)
     let idleOutline = idleGeometry.currentNotchOutlineSize
@@ -16416,13 +16447,15 @@ if CommandLine.arguments.contains("--self-test-helper-pipe") {
     let toolbar = Model(startServices: false, layoutPreferences: layout)
     toolbar.expanded = true
     toolbar.autoHideEnabled = false
-    toolbar.toggleHoverFromPanel()
-    precondition(!toolbar.expanded && !toolbar.hoverEnabled)
+    toolbar.toggleCompactStatusFromPanel()
+    precondition(!toolbar.expanded && toolbar.hoverEnabled && !toolbar.compactStatusVisible)
+    let restoredToolbar = Model(startServices: false, layoutPreferences: layout)
+    precondition(restoredToolbar.hoverEnabled && !restoredToolbar.compactStatusVisible)
     toolbar.handleHover(true)
-    precondition(!toolbar.expanded && !Model(startServices: false, layoutPreferences: layout).hoverEnabled)
-    toolbar.expanded = true
-    toolbar.toggleHoverFromPanel()
-    precondition(toolbar.expanded && toolbar.hoverEnabled && Model(startServices: false, layoutPreferences: layout).hoverEnabled)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.4))
+    precondition(toolbar.expanded)
+    toolbar.toggleCompactStatusFromPanel()
+    precondition(toolbar.expanded && Model(startServices: false, layoutPreferences: layout).compactStatusVisible)
     let editor = Model(startServices: false, layoutPreferences: layout)
     editor.beginHomeEdit()
     editor.setHomeBackground(.aurora)

@@ -956,11 +956,10 @@ struct PhysicalNotchExclusion: ViewModifier {
     func body(content: Content) -> some View {
         if width.isFinite && height.isFinite && width > 0 && height > 0 {
             // Approximate the fixed hardware cutout independently of the app's shoulder.
-            let physicalCorners = NotchCorners(bottom: 8, shoulder: 0)
             content
-                .mask(OutsideNotchMask(notchWidth: width, notchHeight: height, corners: physicalCorners)
+                .mask(OutsideNotchMask(notchWidth: width, notchHeight: height, corners: .physical)
                     .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
-                .mask(OutsideNotchEdgeMask(notchWidth: width, notchHeight: height, corners: physicalCorners)
+                .mask(OutsideNotchEdgeMask(notchWidth: width, notchHeight: height, corners: .physical)
                     .fill(style: FillStyle(eoFill: true)).transaction { $0.animation = nil })
         } else {
             content
@@ -1054,7 +1053,7 @@ private struct LitNotchSurface<Content: View>: View, Animatable {
                     .transaction { if followsMorph { $0.animation = nil } }
                     .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
                     .clipShape(edge)
-                if let peek = model.visibleClipboardPeek, !model.clipboardBadgeFitsHeader {
+                if model.compactStatusVisible, let peek = model.visibleClipboardPeek, !model.clipboardBadgeFitsHeader {
                     ClipboardNotchBadge(kind: peek.kind)
                         .position(x: geometry.size.width / 2 + width / 2 + 12,
                                   y: min(height, max(32, model.cameraHeight)) / 2)
@@ -2764,7 +2763,7 @@ struct AnimatedNotchAmbientLight: View {
                 // Keep a continuous contour under the animated accent while it resizes.
                 NotchIdleLightFrame(time: nil, thickness: widthScale, armRun: agentArmRun,
                                     notchSize: notchSize, corners: corners, tint: waiting ? .orange : tint,
-                                    lightStyle: "classic")
+                                    lightStyle: "classic", isAgentUnderlay: true)
                     .frame(height: glowHeight, alignment: .top)
                     .opacity(0.64)
                 Group {
@@ -3093,6 +3092,7 @@ struct NotchIdleLightFrame: View {
     var corners: NotchCorners = .legacy
     let tint: Color
     let lightStyle: String
+    var isAgentUnderlay = false
 
     var body: some View {
         // A vector stroke can advance with the shell without waiting for a Canvas frame.
@@ -3109,6 +3109,9 @@ struct NotchIdleLightFrame: View {
                 let start = UnitPoint(x: left / size.width, y: 0)
                 let end = UnitPoint(x: (left + span) / size.width, y: 0)
                 let brightness = NotchLightBrightness(time: time, variation: 0.31)
+                // Leave a visible edge after the opaque shell covers the inside half of the stroke.
+                let core = isAgentUnderlay ? (opacity: 0.21, width: 2.6 * thickness)
+                    : (opacity: 0.38, width: 0.9 + 2 * thickness)
                 ZStack {
                     if usesCustomAgentLight(lightStyle, waiting: false) {
                         Canvas { context, size in
@@ -3121,9 +3124,9 @@ struct NotchIdleLightFrame: View {
                                                    startPoint: start, endPoint: end),
                                    style: StrokeStyle(lineWidth: 4.5 * thickness, lineCap: .round, lineJoin: .round))
                         .blur(radius: 4.5)
-                    contour.stroke(LinearGradient(gradient: brightness.gradient(tint, opacity: 0.21 * frame[0]),
+                    contour.stroke(LinearGradient(gradient: brightness.gradient(tint, opacity: core.opacity * frame[0]),
                                                    startPoint: start, endPoint: end),
-                                   style: StrokeStyle(lineWidth: 2.6 * thickness, lineCap: .round, lineJoin: .round))
+                                   style: StrokeStyle(lineWidth: core.width, lineCap: .round, lineJoin: .round))
                         .blur(radius: 0.6)
                 }
             }
