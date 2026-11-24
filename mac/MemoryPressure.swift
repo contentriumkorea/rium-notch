@@ -29,6 +29,27 @@ func currentMemoryPressure() -> String? {
     return memoryPressureLabel(value)
 }
 
+func memoryPressureFill(_ state: String) -> Double {
+    switch state {
+    case "주의": 0.5
+    case "위험": 1
+    default: 0
+    }
+}
+
+// The one-minute run-queue average is scaled against the available processors.
+func cpuPressureFill(load: Double, processors: Int) -> Double? {
+    guard load.isFinite, load >= 0, processors > 0 else { return nil }
+    let loadPerProcessor = load / Double(processors)
+    return min(1, max(0, (loadPerProcessor - 0.5) * 2))
+}
+
+func currentCPUPressureFill() -> Double? {
+    var load = 0.0
+    guard getloadavg(&load, 1) == 1 else { return nil }
+    return cpuPressureFill(load: load, processors: ProcessInfo.processInfo.activeProcessorCount)
+}
+
 struct CompactMonitorBadge: View {
     static let size: CGFloat = 18
 
@@ -37,21 +58,10 @@ struct CompactMonitorBadge: View {
     var showsReadings = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var arcTint: Color {
-        switch model.pressure {
-        case "정상": .white
-        case "주의": Color(red: 1, green: 0.68, blue: 0.65)
-        case "위험": Color(red: 1, green: 0.26, blue: 0.29)
-        default: .white.opacity(0.5)
-        }
-    }
-
     var body: some View {
-        let ramUsage = showsReadings ? (model.memoryHistory.last ?? nil) : nil
-        let cpuUsage = showsReadings ? (model.cpuHistory.last ?? nil) : nil
-        let ramHeadroom = ramUsage.map { min(1, max(0, 1 - $0 / 100)) } ?? 0
-        let cpuHeadroom = cpuUsage.map { min(1, max(0, 1 - $0 / 100)) } ?? 0
-        let arcTint = showsReadings ? self.arcTint : .white
+        let ramPressure = showsReadings ? memoryPressureFill(model.pressure) : 0
+        let cpuPressure = showsReadings ? model.cpuPressureFill ?? 0 : 0
+        let pressureTint = Color(red: 1, green: 0.26, blue: 0.29)
         let strokeWidth = diameter * 0.085
         let dotDiameter = diameter * 0.113
         let outerMargin = diameter * 0.01
@@ -65,10 +75,8 @@ struct CompactMonitorBadge: View {
         let quotaText = (showsReadings ? model.monitorCodexRemaining : nil).map(String.init) ?? "—"
         ZStack {
             ZStack {
-                Circle().trim(from: 0, to: arcFraction).stroke(arcTint.opacity(0.22), style: stroke)
-                if ramHeadroom > 0 {
-                    Circle().trim(from: 0, to: arcFraction * CGFloat(ramHeadroom)).stroke(arcTint, style: stroke)
-                }
+                Circle().trim(from: 0, to: arcFraction).stroke(.white, style: stroke)
+                Circle().trim(from: 0, to: arcFraction * CGFloat(ramPressure)).stroke(pressureTint, style: stroke)
             }
             .rotationEffect(.degrees(arcStartDegrees))
             .padding(arcInset)
@@ -93,16 +101,20 @@ struct CompactMonitorBadge: View {
             }
             ForEach(0..<4) { index in
                 let angle = (126 - 24 * Double(index)) * .pi / 180
-                let fill = min(1, max(0, cpuHeadroom * 4 - Double(index)))
-                Circle().fill(.white.opacity(0.22 + fill * 0.78))
+                let fill = min(1, max(0, cpuPressure * 4 - Double(index)))
+                Circle().fill(.white)
                     .frame(width: dotDiameter, height: dotDiameter)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(pressureTint).frame(width: dotDiameter * fill)
+                    }
+                    .clipShape(Circle())
                     .position(x: center + dotTrackRadius * cos(angle), y: center + dotTrackRadius * sin(angle))
             }
         }
         .frame(width: diameter, height: diameter)
         .foregroundStyle(.white)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: cpuHeadroom)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: ramHeadroom)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: cpuPressure)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: ramPressure)
         .accessibilityHidden(true)
     }
 }

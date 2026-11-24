@@ -1607,6 +1607,7 @@ final class Model: ObservableObject {
     @Published var memory = "측정 중"
     @Published var memoryPercent = "측정 중"
     @Published var pressure = "확인 중"
+    @Published var cpuPressureFill: Double?
     @Published var swap = "확인 중"
     @Published var cpuHistory: [Double?] = []
     @Published var memoryHistory: [Double?] = []
@@ -1620,7 +1621,8 @@ final class Model: ObservableObject {
     }
     var monitorSummary: String {
         let quota = monitorCodexRemaining.map { "\($0)% 남음" } ?? "조회 불가"
-        return "시스템 모니터링, CPU 사용 \(cpu), RAM 사용 \(memoryPercent), 메모리 압력 \(pressure), Codex \(quota)"
+        let cpuLoad = cpuPressureFill.map { $0 == 0 ? "낮음" : ($0 < 1 ? "상승" : "높음") } ?? "조회 불가"
+        return "시스템 모니터링, CPU 부하 \(cpuLoad), 메모리 압력 \(pressure), Codex \(quota)"
     }
     @Published var message = ""
     @Published var expanded = false {
@@ -5612,6 +5614,7 @@ final class Model: ObservableObject {
         memoryPercent = memoryValue.map { String(format: "%.0f%%", $0) } ?? "조회 불가"
         swap = flags & 4 == 0 ? "조회 불가" : String(format: "%.1f GB", Double(swapped) / 1_000_000_000)
         pressure = currentMemoryPressure() ?? pressureEvent ?? "조회 불가"
+        cpuPressureFill = currentCPUPressureFill()
         appendMonitorSample(cpuValue, to: &cpuHistory)
         appendMonitorSample(memoryValue, to: &memoryHistory)
     }
@@ -11399,6 +11402,21 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     precondition(SKTSessionStore.load(service: testService).map(\.name) == ["fixture"])
     SKTSessionStore.clear(service: testService)
     precondition(SKTSessionStore.load(service: testService).isEmpty)
+    let credentials = SKTLoginCredentials(loginID: " fixture ", password: "a b&'\\!")!
+    precondition(credentials.loginID == "fixture" && credentials.password == "a b&'\\!")
+    precondition(SKTLoginCredentials(loginID: " ", password: "x") == nil)
+    precondition(SKTLoginCredentials(loginID: "test", password: "") == nil)
+    let loginService = testService + ".login"
+    precondition(credentials.save(service: loginService))
+    precondition(SKTLoginCredentials.load(service: loginService) == credentials)
+    precondition(SKTLoginCredentials.clear(service: loginService))
+    precondition(SKTLoginCredentials.load(service: loginService) == nil)
+    precondition(SKTLoginCredentials.isLoginPage(URL(string: "https://auth.skt-id.co.kr/v2/login?client=fixture")!))
+    for url in ["http://auth.skt-id.co.kr/v2/login", "https://auth.skt-id.co.kr:444/v2/login",
+                "https://auth.skt-id.co.kr.example.org/v2/login", "https://auth.skt-id.co.kr/v2/verify",
+                "https://auth.skt-id.co.kr@other.example/v2/login"] {
+        precondition(!SKTLoginCredentials.isLoginPage(URL(string: url)!))
+    }
     print("SKT shared data parser self-test passed")
 } else if CommandLine.arguments.contains("--self-test-helper-pipe") {
     let pipe = Pipe()
@@ -16946,8 +16964,11 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
             let used = Double(remaining).map { 100 - $0 } ?? .nan
             model.accounts[0].remaining = CodexRemainingWindow(["usedPercent": used])
         }
-        model.cpuHistory = [Double(environment["RIUM_MONITOR_CPU"] ?? "45")]
-        model.memoryHistory = [Double(environment["RIUM_MONITOR_RAM"] ?? "72")]
+        precondition(cpuPressureFill(load: 4, processors: 8) == 0)
+        precondition(cpuPressureFill(load: 6, processors: 8) == 0.5)
+        precondition(cpuPressureFill(load: 12, processors: 8) == 1)
+        precondition(cpuPressureFill(load: .nan, processors: 8) == nil)
+        model.cpuPressureFill = Double(environment["RIUM_MONITOR_CPU_PRESSURE"] ?? "0")
         model.pressure = environment["RIUM_MONITOR_PRESSURE"] ?? "정상"
         if let phase = environment["RIUM_MONITOR_AGENT"], ["1", "preview", "completed", "waiting"].contains(phase) {
             let state = phase == "completed" ? "완료" : (phase == "waiting" ? "질문 대기" : "작업 중")
