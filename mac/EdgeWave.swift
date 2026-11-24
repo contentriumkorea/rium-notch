@@ -96,7 +96,8 @@ struct FullScreenEdgeWave: View {
     @ObservedObject var model: Model
     @AppStorage("rium.light.waveStyle") private var waveStyle = "notch"
     var body: some View {
-        let interval = model.notchGeometryInMotion || waveStyle == "perimeter" ? 1.0 / 60.0 : 1.0 / 30.0
+        let usesPerimeter = waveStyle == "perimeter" || model.notchScreenWaves.contains { $0.previewStyle == "perimeter" }
+        let interval = model.notchGeometryInMotion || usesPerimeter ? 1.0 / 60.0 : 1.0 / 30.0
         TimelineView(.animation(minimumInterval: interval,
                                 paused: model.edgeWaves.isEmpty && model.notchScreenWaves.isEmpty)) { _ in
             let outline = model.renderedNotchOutlineSize ?? model.currentNotchOutlineSize
@@ -133,8 +134,12 @@ private struct AnimatedFullScreenEdgeWave: View {
     }
 
     var body: some View {
+        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
         let visibleWaves = model.notchScreenWaves.filter { wave in
-            wave.kind.isClipboardScreenWave ? clipboardLight && enabled : agentLight && agentScreenWave && wave.kind.supportsAgentScreenWave(style: lightStyle, waveStyle: waveStyle)
+            if wave.previewStyle != nil { return true }
+            if lowPower { return false }
+            if wave.kind.isClipboardScreenWave { return clipboardLight && enabled }
+            return agentLight && agentScreenWave && wave.kind.supportsAgentScreenWave(style: lightStyle, waveStyle: waveStyle)
         }
         GeometryReader { geometry in
           let frame = island?.frame ?? CGRect(x: (geometry.size.width - notchWidth) / 2, y: 0,
@@ -232,12 +237,13 @@ private struct AnimatedFullScreenEdgeWave: View {
                 .transition(.asymmetric(insertion: .identity, removal: .opacity))
               }
             }
-            if lightEnabled && !reduceMotion && !ProcessInfo.processInfo.isLowPowerModeEnabled {
+            if lightEnabled && !reduceMotion {
                 ForEach(visibleWaves) { wave in
                     let tint = waveColors.tint(for: wave.kind)
+                    let usesPerimeter = (wave.previewStyle ?? waveStyle) == "perimeter"
                     Group {
                     // Keep simultaneous full-screen Metal surfaces bounded.
-                    if waveStyle == "perimeter" {
+                    if usesPerimeter {
                         DisplayPerimeterWave(started: wave.started, now: now, tint: tint,
                                              surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle))
                     } else if metalIDs.contains(wave.id) {
@@ -250,7 +256,7 @@ private struct AnimatedFullScreenEdgeWave: View {
                                                 surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle))
                     }
                     }
-                    .opacity(waveStyle == "perimeter" ? 1 : notchLightFadeEnvelope(elapsed: now - wave.started, duration: 2.6))
+                    .opacity(usesPerimeter ? 1 : notchLightFadeEnvelope(elapsed: now - wave.started, duration: 2.6))
                     .transition(.asymmetric(insertion: .identity, removal: .opacity))
                 }
             }

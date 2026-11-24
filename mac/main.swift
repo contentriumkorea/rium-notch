@@ -520,6 +520,7 @@ struct NotchScreenWave: Identifiable {
     let id = UUID()
     let started: TimeInterval
     let kind: NotchLightCue.Kind
+    var previewStyle: String? = nil
 }
 enum AgentTransientKind: Equatable { case running, completed, failed, interrupted, stalled }
 struct AgentTransientPeek: Identifiable {
@@ -3058,7 +3059,13 @@ final class Model: ObservableObject {
         }
         enqueueScreenWaves(waves)
     }
-    private func enqueueScreenWaves(_ waves: [NotchScreenWave]) {
+    func previewScreenWave(style: String) {
+        guard !systemNotificationScreenLocked, !systemNotificationSleeping else { return }
+        notchScreenWaves.removeAll { $0.previewStyle != nil }
+        enqueueScreenWaves([NotchScreenWave(started: ProcessInfo.processInfo.systemUptime,
+                                           kind: .agentDone, previewStyle: style)])
+    }
+    fileprivate func enqueueScreenWaves(_ waves: [NotchScreenWave]) {
         guard !waves.isEmpty else { return }
         notchScreenWaves.append(contentsOf: waves)
         if notchScreenWaves.count > 64 { notchScreenWaves.removeFirst(notchScreenWaves.count - 64) }
@@ -11358,6 +11365,17 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     precondition(perimeterWavePath(size: .zero).isEmpty)
     precondition(NotchLightCue.Kind.agentRunning.supportsAgentScreenWave(style: "classic", waveStyle: "perimeter"))
     precondition(!NotchLightCue.Kind.agentRunning.supportsAgentScreenWave(style: "classic", waveStyle: "notch"))
+    let model = Model(startServices: false)
+    let event = NotchScreenWave(started: ProcessInfo.processInfo.systemUptime, kind: .agentQuestion)
+    model.enqueueScreenWaves([event])
+    model.previewScreenWave(style: "notch")
+    let firstPreview = model.notchScreenWaves.last!
+    precondition(firstPreview.previewStyle == "notch")
+    model.previewScreenWave(style: "notch")
+    precondition(model.notchScreenWaves.count == 2 && model.notchScreenWaves.last?.id != firstPreview.id)
+    model.previewScreenWave(style: "perimeter")
+    precondition(model.notchScreenWaves.count == 2 && model.notchScreenWaves.first?.id == event.id)
+    precondition(model.notchScreenWaves.last?.previewStyle == "perimeter")
     print("perimeter wave self-test passed")
 } else if CommandLine.arguments.contains("--self-test-skt-usage") {
     let row = ["통합공유 데이터 80GB", "50.52GB", "29.48GB", "-"]

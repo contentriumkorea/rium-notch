@@ -767,6 +767,22 @@ struct SettingsView: View {
             }
         }.disabled(!lightEnabled)
     }
+    private func waveStyleButton(_ title: String, style: String) -> some View {
+        let selected = waveStyle == style
+        return Button {
+            waveStyle = style
+            model.previewScreenWave(style: style)
+        } label: {
+            Text(title)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, minHeight: 24)
+                .background(selected ? .white.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help("선택하고 미리 재생")
+    }
     private var lightControls: some View {
             SettingsCard(title: "노치 조명") {
                 Toggle("노치 조명", isOn: $lightEnabled)
@@ -781,10 +797,15 @@ struct SettingsView: View {
                     }
                     Text("100%는 AI 작업 중 밝기와 같습니다.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Picker("화면 파동 방식", selection: $waveStyle) {
-                        Text("노치에서 퍼짐").tag("notch")
-                        Text("화면 테두리 한 바퀴").tag("perimeter")
-                    }.pickerStyle(.segmented).disabled(!lightEnabled)
+                    HStack(spacing: 8) {
+                        Text("화면 파동 방식")
+                        HStack(spacing: 2) {
+                            waveStyleButton("노치에서 퍼짐", style: "notch")
+                            waveStyleButton("화면 테두리 한 바퀴", style: "perimeter")
+                        }
+                        .padding(2)
+                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                    }
                     Picker("화면 파동 색상", selection: waveColors.$mode) {
                         Text("자동").tag(ScreenWaveColorMode.automatic)
                         Text("노치 기본색").tag(ScreenWaveColorMode.notch)
