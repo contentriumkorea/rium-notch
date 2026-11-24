@@ -365,7 +365,7 @@ struct SettingsView: View {
                         }
                     }
                     if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary) }
-                    Text("위쪽 호는 메모리 압력, 아래쪽 점은 CPU 실행 대기열 부하를 표시합니다. 빨간색이 늘어날수록 부하가 높고, 가운데 숫자는 선택한 계정의 기본 한도 잔여율입니다.")
+                    Text("위쪽 호는 메모리 압력, 아래쪽 점은 CPU 실행 대기열 부하를 표시합니다. 부하가 높아지면 왼쪽부터 주황색에서 빨간색으로 채워집니다. 가운데 숫자는 선택한 계정의 기본 한도 잔여율입니다.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
