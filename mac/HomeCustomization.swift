@@ -127,8 +127,7 @@ struct EditableNotchTab: View {
             HStack(spacing: 6) {
                 Image(systemName: tab.icon).frame(width: 16)
                 if tab == .agents {
-                    let count = activeAgentSessionCount(model.agentItems, assistant: model.assistantIndicator,
-                                                        assistantThread: model.assistant.observationThreadID)
+                    let count = model.visibleActiveAgentCount
                     if count > 0 { Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.black).padding(.horizontal, 6).padding(.vertical, 2).background(Color.blue, in: Capsule()) }
                 }
                 if tab == .clipboard && !model.clipboardItems.isEmpty { Text("\(model.clipboardItems.count)").font(.system(size: 10)).foregroundStyle(.secondary) }
@@ -454,19 +453,19 @@ struct HomeVariantPreview: View {
                     if variant == "date" { Text(model.now, format: .dateTime.day()).font(.system(size: 17, weight: .light)) }
                     else if variant == "clock" { Text(model.now, style: .time).font(.system(size: 14, weight: .light)).lineLimit(1).minimumScaleFactor(0.5) }
                     else if variant == "dial" || variant == "ringClock" { Image(systemName: "clock").font(.system(size: 18)).foregroundStyle(.white.opacity(0.75)) }
-                    else if variant == "day" { Text(model.agenda.todayEvents.first?.title ?? (model.agenda.calendarReadable ? "오늘 일정 없음" : "일정 권한 필요")).font(.system(size: 8)).lineLimit(2) }
+                    else if variant == "day" { Text(model.agenda.todayEvents.first?.title ?? (model.agenda.calendarReadable ? "오늘 일정 없음" : "Google 계정 연결 필요")).font(.system(size: 8)).lineLimit(2) }
                     else if variant == "agenda" {
                         let first = model.agenda.events.first { event in
                             guard let start = event.start, let end = event.end else { return false }
                             return eventIsRemainingToday(start: start, end: end, now: model.now, calendar: .current)
                         }
-                        Text(first?.title ?? (model.agenda.calendarReadable ? "남은 일정 없음" : "일정 권한 필요")).font(.system(size: 8)).lineLimit(2)
+                        Text(first?.title ?? (model.agenda.calendarReadable ? "남은 일정 없음" : "Google 계정 연결 필요")).font(.system(size: 8)).lineLimit(2)
                     }
                     else if variant == "week" { Text(model.now, format: .dateTime.month().day()).font(.system(size: 12, weight: .light)).lineLimit(1) }
                     else if variant == "month" { Text(model.now, format: .dateTime.month(.wide)).font(.system(size: 12, weight: .light)).lineLimit(1) }
                     else if variant == "countdown" {
                         let next = model.agenda.events.first { ($0.end ?? $0.start ?? .distantPast) > model.now }
-                        Text(next.map { agendaRelativeLabel($0, now: model.now) } ?? (model.agenda.calendarReadable ? "일정 없음" : "일정 권한 필요"))
+                        Text(next.map { agendaRelativeLabel($0, now: model.now) } ?? (model.agenda.calendarReadable ? "일정 없음" : "Google 계정 연결 필요"))
                             .font(.system(size: 9)).lineLimit(1)
                     }
                     else { Text(model.agenda.events.first.map { agendaTimeLabel($0) } ?? "일정 없음").font(.system(size: 13, weight: .light)).lineLimit(1) }
@@ -662,7 +661,7 @@ struct HomeCalendarCountdownView: View {
                 }.frame(width: diameter, height: diameter).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("다음 일정").font(.system(size: 9)).foregroundStyle(ink.opacity(0.65))
-                    Text(event?.title ?? (agenda.calendarReadable ? "일정 없음" : "일정 권한 필요"))
+                    Text(event?.title ?? (agenda.calendarReadable ? "일정 없음" : "Google 계정 연결 필요"))
                         .font(.system(size: 11, weight: .semibold)).lineLimit(2)
                     if let event = event { Text(agendaRelativeLabel(event, now: now)).font(.system(size: 9)).foregroundStyle(ink.opacity(0.65)).lineLimit(1) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -724,7 +723,7 @@ struct HomeCalendarMonthView: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 3) {
                 Text(now, format: .dateTime.year().month(.wide)).font(.system(size: 9, weight: .semibold)).lineLimit(1)
-                if !agenda.calendarReadable { Text("일정 권한 필요").font(.system(size: 7)).foregroundStyle(ink.opacity(0.6)).lineLimit(1) }
+                if !agenda.calendarReadable { Text("Google 계정 연결 필요").font(.system(size: 7)).foregroundStyle(ink.opacity(0.6)).lineLimit(1) }
             }.foregroundStyle(ink)
             HStack(spacing: 0) {
                 ForEach(0..<7, id: \.self) { column in
@@ -788,7 +787,7 @@ struct HomeCalendarWeekView: View {
                     }.frame(maxWidth: .infinity)
                 }
             }
-            if !agenda.calendarReadable { Text("일정 권한 필요").font(.system(size: 8)).foregroundStyle(ink.opacity(0.6)).lineLimit(1) }
+            if !agenda.calendarReadable { Text("Google 계정 연결 필요").font(.system(size: 8)).foregroundStyle(ink.opacity(0.6)).lineLimit(1) }
         }
     }
 }

@@ -430,7 +430,14 @@ pub fn shell_contour_metrics(width: f64, height: f64, bottom: f64, shoulder: f64
     let shoulder = shoulder.max(0.0).min(width / 2.0);
     let inner_width = (width - 2.0 * shoulder).max(0.0);
     let radius = bottom.max(0.0).min(inner_width.min(height) / 2.0);
-    Some([shoulder, radius, shoulder * 0.21999999999999997, radius * 0.78])
+    // Keep the physical shoulder shape with either bottom corner radius.
+    // Blend smoothly as the shoulder and the bottom corners change size.
+    let equal_radii_weight = 1.0 - (shoulder - radius).abs() / 4.0;
+    let physical_shoulder_weight = 1.0 - (shoulder - 10.0).abs() / 2.0;
+    let weight = equal_radii_weight.max(physical_shoulder_weight).clamp(0.0, 1.0);
+    let smooth_weight = weight * weight * (3.0 - 2.0 * weight);
+    let upper = shoulder * (0.22 + 0.12 * smooth_weight);
+    Some([shoulder, radius, upper, radius * 0.78])
 }
 
 /// Writes shoulder, bottom radius, upper control and lower control distances.
@@ -1396,6 +1403,8 @@ mod shell_corner_tests {
     #[test]
     fn shoulder_and_bottom_radius_follow_reference_rect_rules() {
         for (input, expected) in [
+            ([205.0, 32.0, 10.0, 10.0], [10.0, 10.0, 3.4, 7.8]),
+            ([890.0, 210.0, 28.0, 10.0], [10.0, 28.0, 3.4, 21.84]),
             ([240.0, 32.0, 16.0, 20.0], [20.0, 16.0, 4.4, 12.48]),
             ([200.0, 90.0, 28.0, 36.0], [36.0, 28.0, 7.92, 21.84]),
             ([10.0, 50.0, 16.0, 20.0], [5.0, 0.0, 1.1, 0.0]),
@@ -1403,6 +1412,10 @@ mod shell_corner_tests {
             let actual = shell_contour_metrics(input[0], input[1], input[2], input[3]).unwrap();
             for i in 0..4 { assert!((actual[i] - expected[i]).abs() < 1e-9); }
         }
+        let left = shell_contour_y(5.0, 205.0, 32.0, 10.0, 10.0).unwrap();
+        let right = shell_contour_y(200.0, 205.0, 32.0, 10.0, 10.0).unwrap();
+        assert!(left > 0.8 && left < 1.0);
+        assert!((left - right).abs() < 1e-9);
         assert!(shell_contour_metrics(f64::NAN, 32.0, 8.0, 0.0).is_none());
     }
 

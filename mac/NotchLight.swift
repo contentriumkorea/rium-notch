@@ -578,6 +578,20 @@ func systemLevelPulseEnergy(next: NotchLightCue.Kind, active: NotchLightCue?, no
     }
 }
 
+func notchLightFadeAnimation(_ reduceMotion: Bool) -> Animation {
+    .easeInOut(duration: reduceMotion ? 0.14 : 0.24)
+}
+
+func notchLightFadeEnvelope(elapsed: TimeInterval, duration: TimeInterval,
+                            attack: TimeInterval = 0.12, release: TimeInterval = 0.24) -> Double {
+    guard elapsed.isFinite, elapsed >= 0, duration > 0 else { return 0 }
+    func ease(_ progress: Double) -> Double {
+        let t = min(1, max(0, progress))
+        return t * t * (3 - 2 * t)
+    }
+    return ease(elapsed / attack) * ease((duration - elapsed) / release)
+}
+
 func notchEventEnvelope(_ cue: NotchLightCue, at uptime: TimeInterval) -> Double {
     guard uptime.isFinite else { return 0 }
     let elapsed = cue.elapsed(at: uptime)
@@ -1164,7 +1178,8 @@ struct NotchContainer: View {
                                 height: outline.height, corners: corners, compactLight: model.expanded ? 0 : 1,
                                 content: ZStack(alignment: .top) {
                     if (model.expanded || retainContentDuringClose) && model.section == .home && cardStyle == "liquid" {
-                        let homeOutline = notchOutlineSize(content: model.expandedNotchSize, expanded: true, screenWidth: model.displayWidth)
+                        let homeOutline = notchOutlineSize(content: model.expandedNotchSize, screenWidth: model.displayWidth,
+                                                           shoulderOutset: NotchCorners.expanded.shoulder)
                         HomeAtmosphere(model: model, width: homeOutline.width, height: homeOutline.height)
                             .transition(.identity)
                     }
@@ -1980,6 +1995,7 @@ struct NotchEventLight: View {
                 }
                 drawFadingEventSegment(context: &context, path: segment, tint: tint, envelope: envelope, thickness: thickness)
             }
+            .opacity(notchLightFadeEnvelope(elapsed: elapsed, duration: cue.duration))
         }
         .frame(width: notchWidth + armWidth * 2 + horizontalGlowPadding * 2,
                height: notchEventLightHeight(kind: cue.kind, notchHeight: notchHeight))
@@ -2008,13 +2024,14 @@ func receivingLightElapsed(started: TimeInterval, now: TimeInterval) -> TimeInte
 
 private func drawReceivingTide(context: inout GraphicsContext, contour: Path, edge: Path,
                                elapsed: TimeInterval, progress: Double?, held: Bool, reduceMotion: Bool,
-                               thickness: CGFloat, surfaceStyle: Float, edgeMaskWidth: CGFloat = 0) {
+                               thickness: CGFloat, surfaceStyle: Float, tint: ScreenWaveTint,
+                               edgeMaskWidth: CGFloat = 0) {
     var parameters = [Double](repeating: 0, count: 2)
     let status = parameters.withUnsafeMutableBufferPointer {
         rustReceivingTide(elapsed, elapsed, progress ?? 0, held ? 1 : 0, reduceMotion ? 1 : 0, $0.baseAddress)
     }
     let charge = status == 0 ? max(0, min(1.5, parameters[1])) : 0
-    let components = edgeWaveTint(nil)
+    let components = tint
     var halo = context; halo.addFilter(.blur(radius: 8))
     halo.stroke(edge, with: .color(edgeWaveFallbackColor(components, opacity: 0.20 * charge, style: surfaceStyle)), style: StrokeStyle(lineWidth: 9 * thickness, lineCap: .round))
     context.stroke(edge, with: .color(edgeWaveFallbackColor(components, opacity: 0.45 * charge, style: surfaceStyle)), style: StrokeStyle(lineWidth: 2 * thickness + edgeMaskWidth, lineCap: .round))
@@ -2044,30 +2061,37 @@ struct NotchReceivingLight: View {
     @State private var useMetal = false
     @State private var metalFailed = false
     @State private var metalID = UUID()
+    private var waveColors = ScreenWaveColors()
+
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { _ in
             let clock = ProcessInfo.processInfo.systemUptime
             let elapsed = receivingLightElapsed(started: started, now: clock)
             let held = reduceMotion || elapsed >= 2
-            Group {
-            if held && useMetal && !reduceMotion {
-                let safeProgress = progress.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil } ?? 0
-                EdgeWaveMetal(cue: EdgeWaveCue(id: metalID, started: started, inward: true),
-                              notchSize: CGSize(width: notchWidth, height: notchHeight), heldProgress: safeProgress,
-                              lightThickness: thickness, surfaceStyle: surfaceStyle) {
-                    metalFailed = true; useMetal = false
+            let drawsMetal = held && useMetal && !reduceMotion
+            let tint = waveColors.tint(for: nil)
+            ZStack {
+                if drawsMetal {
+                    let safeProgress = progress.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil } ?? 0
+                    EdgeWaveMetal(cue: EdgeWaveCue(id: metalID, started: started, inward: true),
+                                  notchSize: CGSize(width: notchWidth, height: notchHeight), heldProgress: safeProgress,
+                                  lightThickness: thickness, surfaceStyle: surfaceStyle, tint: tint) {
+                        metalFailed = true; useMetal = false
+                    }.frame(width: notchWidth + 2 * armWidth + 40, height: notchHeight + NotchContainer.lightPadding)
+                        .transition(.opacity)
+                } else {
+                Canvas { context, _ in
+                    context.translateBy(x: 20, y: 0)
+                    let contour = lightContour(width: notchWidth, height: notchHeight, armWidth: armWidth, corners: corners)
+                    let edge = lightContour(width: notchWidth, height: notchHeight, armWidth: 0, corners: corners)
+                        .applying(CGAffineTransform(translationX: armWidth, y: 0))
+                    drawReceivingTide(context: &context, contour: contour, edge: edge, elapsed: elapsed, progress: progress,
+                                      held: held, reduceMotion: reduceMotion, thickness: thickness, surfaceStyle: surfaceStyle, tint: tint)
                 }.frame(width: notchWidth + 2 * armWidth + 40, height: notchHeight + NotchContainer.lightPadding)
-            } else {
-            Canvas { context, _ in
-                context.translateBy(x: 20, y: 0)
-                let contour = lightContour(width: notchWidth, height: notchHeight, armWidth: armWidth, corners: corners)
-                let edge = lightContour(width: notchWidth, height: notchHeight, armWidth: 0, corners: corners)
-                    .applying(CGAffineTransform(translationX: armWidth, y: 0))
-                drawReceivingTide(context: &context, contour: contour, edge: edge, elapsed: elapsed, progress: progress,
-                                  held: held, reduceMotion: reduceMotion, thickness: thickness, surfaceStyle: surfaceStyle)
-            }.frame(width: notchWidth + 2 * armWidth + 40, height: notchHeight + NotchContainer.lightPadding)
+                    .transition(.opacity)
+                }
             }
-            }
+            .animation(notchLightFadeAnimation(reduceMotion), value: drawsMetal)
             .onChange(of: held) { value in
                 // Pick once at the held phase boundary; a late Metal pipeline
                 // must not replace an already-visible Canvas mid-transfer.
@@ -2220,6 +2244,30 @@ func floatingLightReachScale(_ preset: String) -> CGFloat {
     case "medium": return 2.0 / 3.0
     case "wide": return 5.0 / 6.0
     default: return 1.0
+    }
+}
+
+struct IdleLightSettings: DynamicProperty {
+    static let defaultPercent = 40.0
+    @AppStorage("rium.light.idleBrightnessMode") private var legacyMode = "fixed"
+    @AppStorage("rium.light.idleBrightnessPercent") private var savedPercent = IdleLightSettings.defaultPercent
+
+    var percent: Double {
+        get {
+            if legacyMode == "matchAgent" { return 100 }
+            return Self.clampedPercent(savedPercent)
+        }
+        nonmutating set {
+            savedPercent = newValue
+            legacyMode = "fixed"
+        }
+    }
+
+    var opacity: Double { percent / 100 }
+
+    static func clampedPercent(_ percent: Double) -> Double {
+        guard percent.isFinite else { return defaultPercent }
+        return min(100, max(0, percent))
     }
 }
 
@@ -2504,6 +2552,8 @@ struct FloatingIslandAmbientLight: View {
     @AppStorage("rium.light.baseColor") private var lightBaseColor = NotchLightColor.defaultRGB
     @AppStorage("rium.light.width") private var lightWidth = "extraLarge"
     @AppStorage("rium.light.surfaceStyle") private var surfaceStyle = "neon"
+    private var waveColors = ScreenWaveColors()
+    private var idleBrightness = IdleLightSettings()
 
     init(model: Model, frame: CGRect, radius: CGFloat) {
         self.model = model
@@ -2531,152 +2581,184 @@ struct FloatingIslandAmbientLight: View {
     }
 
     var body: some View {
-        if enabled && !model.hoverSuspended {
-            let cues = model.visibleLightCues.filter { cueEnabled($0.kind) }
-            let state = combinedAgentLightState(model.externalAgentItems, assistant: model.assistantIndicator, assistantToolRunning: model.assistantToolRunning, assistantSpeaking: model.assistantSpeaking)
-            let active = agentEnabled && state.active
-            let waiting = active && state.waiting
-            let customStyle = active && usesCustomAgentLight(lightStyle, waiting: waiting)
-            let dictating = dictationEnabled && model.dictationDisplayActive
-            let playingMusic = musicEnabled && model.mediaLightPlaying && !dictating
-            let spectrumIntensity = spectrum.intensityTransition
-            let showsMusicProgress = musicEnabled && musicProgressEnabled && model.showsMusicProgress
-            let receiving = airDropEnabled && model.receivingFile
-            let shelfHover = model.fileDragActive && (shelfEnabled || airDropEnabled)
-            let shelfCatch = model.shelfCatchCue.flatMap { cue in
-                shelfCatchLightEnabled(zone: cue.zone, light: enabled, shelf: shelfEnabled, airDrop: airDropEnabled) ? cue : nil
-            }
-            let paused = cues.isEmpty && shelfCatch == nil &&
-                (reduceMotion || (!shelfHover && !receiving && !dictating && customStyle && !showsMusicProgress && notchStyleTimelinePaused(lightStyle, reduceMotion: false)))
-            // Shell motion has its own interpolated geometry; only the quiet breathing light needs fewer ticks.
-            let animatedFeedback = active || playingMusic || receiving || dictating || showsMusicProgress ||
-                shelfHover || shelfCatch != nil || !cues.isEmpty
-            let profile = NotchLightProfile(thickness)
-            let interval = animatedFeedback ? 1.0 / 30.0 : 1.0 / 8.0
-            TimelineView(.animation(minimumInterval: interval, paused: paused)) { timeline in
-                let time = ProcessInfo.processInfo.systemUptime
-                let progressPath = FloatingIslandShape(radius: radius, closesTop: false).path(in: frame)
-                let path = Path {
-                    $0.addPath(progressPath)
-                    $0.closeSubpath()
+        ZStack {
+            if enabled && !model.hoverSuspended {
+                let cues = model.visibleLightCues.filter { cueEnabled($0.kind) }
+                let state = combinedAgentLightState(model.externalAgentItems, assistant: model.assistantIndicator, assistantToolRunning: model.assistantToolRunning, assistantSpeaking: model.assistantSpeaking)
+                let active = agentEnabled && state.active
+                let waiting = active && state.waiting
+                let variant = agentAmbientVariant(waiting: waiting, question: state.question, acting: state.acting)
+                let dictating = dictationEnabled && model.dictationDisplayActive
+                let playingMusic = musicEnabled && model.mediaLightPlaying && !dictating
+                let showsIdle = !active && !playingMusic
+                let customStyle = (active || showsIdle) && usesCustomAgentLight(lightStyle, waiting: waiting)
+                let showsMusicRipple = playingMusic && !active && !reduceMotion
+                let ambientMode = active ? "agent-\(variant)" : (playingMusic ? "music" : "idle")
+                let spectrumIntensity = spectrum.intensityTransition
+                let showsMusicProgress = musicEnabled && musicProgressEnabled && model.showsMusicProgress
+                let receiving = airDropEnabled && model.receivingFile
+                let shelfHover = model.fileDragActive && (shelfEnabled || airDropEnabled)
+                let shelfCatch = model.shelfCatchCue.flatMap { cue in
+                    shelfCatchLightEnabled(zone: cue.zone, light: enabled, shelf: shelfEnabled, airDrop: airDropEnabled) ? cue : nil
                 }
-                let strokeScale = profile.thickness
-                let dictationTime = reduceMotion ? 0.6 : timeline.date.timeIntervalSinceReferenceDate
-                let dictationColors = dictating ? dictationAuroraColors(time: dictationTime, reduceMotion: reduceMotion) : nil
-                Canvas { context, _ in
+                let paused = cues.isEmpty && shelfCatch == nil &&
+                    (reduceMotion || (!shelfHover && !receiving && !dictating && customStyle && !showsMusicProgress && notchStyleTimelinePaused(lightStyle, reduceMotion: false)))
+                // Shell motion has its own interpolated geometry; only the quiet breathing light needs fewer ticks.
+                let animatedFeedback = active || playingMusic || receiving || dictating || showsMusicProgress ||
+                    shelfHover || shelfCatch != nil || !cues.isEmpty
+                let profile = NotchLightProfile(thickness)
+                let interval = animatedFeedback ? 1.0 / 30.0 : 1.0 / 8.0
+                TimelineView(.animation(minimumInterval: interval, paused: paused)) { timeline in
+                    let time = ProcessInfo.processInfo.systemUptime
+                    let progressPath = FloatingIslandShape(radius: radius, closesTop: false).path(in: frame)
+                    let path = Path {
+                        $0.addPath(progressPath)
+                        $0.closeSubpath()
+                    }
+                    let strokeScale = profile.thickness
+                    let dictationTime = reduceMotion ? 0.6 : timeline.date.timeIntervalSinceReferenceDate
+                    let dictationColors = dictating ? dictationAuroraColors(time: dictationTime, reduceMotion: reduceMotion) : nil
                     let reach = floatingLightReachScale(lightWidth)
-                    let question = state.question
-                    let acting = active && state.acting
-                    let styleTint = NotchLightColor.color(lightBaseColor)
-                    if customStyle {
-                        drawFloatingNotchStyle(lightStyle, in: &context, contour: path, tint: styleTint,
-                                               time: reduceMotion ? 0 : time, strength: acting ? 1 : 0.78,
-                                               thickness: strokeScale, reach: reach)
-                    } else {
-                        var palette = [Double](repeating: 0, count: 41 * 3)
-                        let paletteStatus = waiting ? palette.withUnsafeMutableBufferPointer {
-                            question
-                                ? rustNotchQuestionPalette(0, 1, 0, $0.baseAddress)
-                                : rustAgentOrganicPalette(0, 1, 1, 0, $0.baseAddress)
-                        } : -1
-                        let brightness = NotchLightBrightness(time: reduceMotion ? nil : time, variation: active ? 0.21 : 0.31)
-                        let left = CGPoint(x: frame.minX, y: frame.midY), right = CGPoint(x: frame.maxX, y: frame.midY)
-                        let gradient: GraphicsContext.Shading
-                        if waiting && paletteStatus == 0 {
-                            let stops = (0..<41).map { index in
-                                let location = CGFloat(index) / 40
-                                return Gradient.Stop(color: Color(red: palette[index * 3], green: palette[index * 3 + 1],
-                                                                  blue: palette[index * 3 + 2]).opacity(brightness.at(location)),
-                                                     location: location)
-                            }
-                            gradient = .linearGradient(Gradient(stops: stops), startPoint: CGPoint(x: frame.minX, y: frame.midY), endPoint: CGPoint(x: frame.maxX, y: frame.midY))
-                        } else {
-                            let tint = playingMusic && !active ? Color(nsColor: model.mediaLightColor) : styleTint
-                            gradient = .linearGradient(brightness.gradient(tint, opacity: 1, fadesAtEnds: false),
-                                                       startPoint: left, endPoint: right)
-                        }
-                        var pulse = [Double](repeating: 1, count: 3)
-                        _ = pulse.withUnsafeMutableBufferPointer { rustNotchIdleLight(time, reduceMotion ? 1 : 0, $0.baseAddress) }
-                        let intensity = active ? 0.45 : (playingMusic ? 0.22 : 0.17 * pulse[0])
-                        drawFloatingHalo(in: context, path: path, shading: gradient, intensity: intensity,
-                                         active: active, thickness: strokeScale, reach: reach)
-                        if !active && !playingMusic && usesCustomAgentLight(lightStyle, waiting: false) {
-                            drawFloatingNotchStyle(lightStyle, in: &context, contour: path, tint: styleTint,
-                                                   time: reduceMotion ? 0 : time, strength: 0.38,
-                                                   thickness: strokeScale, reach: reach)
-                        }
-                    }
-                    if playingMusic && !active && !reduceMotion {
-                        let intensity = musicRippleIntensity(at: time, spectrum: spectrumIntensity)
-                        let tint = Color(nsColor: musicCrestColor(model.mediaLightColor))
-                        let spread = 0.08 * reach
-                        var ripple = context
-                        ripple.addFilter(.blur(radius: 3 * reach))
-                        for offset in [0.0, 0.5] {
-                            let phase = musicRipplePhase(time: time, offset: offset)
-                            var pair = Path()
-                            for center in [0.5 - phase * 0.48, 0.5 + phase * 0.48] {
-                                pair.addPath(progressPath.trimmedPath(from: max(0, center - spread), to: min(1, center + spread)))
-                            }
-                            ripple.stroke(pair, with: .color(tint.opacity((1 - phase * 0.7) * intensity * 0.34)),
-                                          style: StrokeStyle(lineWidth: 6 * strokeScale, lineCap: .round, lineJoin: .round))
-                        }
-                    }
-                    if showsMusicProgress {
-                        let fraction = rustMusicProgressFraction(model.currentMediaElapsed(at: time), model.mediaDuration)
-                        if fraction >= 0 {
-                            drawMusicProgress(context: &context, path: progressPath, progress: CGFloat(fraction),
-                                              tint: model.mediaLightColor, thickness: strokeScale)
-                        }
-                    }
-                    if let dictationColors {
-                        drawDictationAurora(context: &context, path: progressPath, notchWidth: frame.width,
-                                            level: model.dictationLevel, time: dictationTime, thickness: strokeScale,
-                                            colors: dictationColors, reach: reach, edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth)
-                    }
-                    if receiving {
-                        let elapsed = receivingLightElapsed(started: model.receivingFileStarted, now: time)
-                        drawReceivingTide(context: &context, contour: progressPath, edge: progressPath, elapsed: elapsed,
-                                          progress: model.receivingFileProgress, held: reduceMotion || elapsed >= 2,
-                                          reduceMotion: reduceMotion, thickness: strokeScale,
-                                          surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle),
-                                          edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth)
-                    }
-                }
-                .overlay {
-                    if timerEnabled {
-                        TimerNotchLight(model: model, thickness: strokeScale, edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth) { _ in progressPath }
-                    }
-                }
-                .overlay {
-                    if !cues.isEmpty || shelfHover || shelfCatch != nil {
+                    ZStack {
                         Canvas { context, _ in
-                            let corners = FloatingIslandShape(radius: radius).cornerMetrics(in: frame)
-                            if let corners {
-                                let travel = corners.shoulder + corners.side + corners.arc
-                                if shelfHover {
+                            let question = state.question
+                            let acting = active && state.acting
+                            let styleTint = NotchLightColor.color(lightBaseColor)
+                            if customStyle {
+                                drawFloatingNotchStyle(lightStyle, in: &context, contour: path, tint: styleTint,
+                                                       time: reduceMotion ? 0 : time, strength: acting ? 1 : 0.78,
+                                                       thickness: strokeScale, reach: reach)
+                            } else {
+                                var palette = [Double](repeating: 0, count: 41 * 3)
+                                let paletteStatus = waiting ? palette.withUnsafeMutableBufferPointer {
+                                    question
+                                        ? rustNotchQuestionPalette(0, 1, 0, $0.baseAddress)
+                                        : rustAgentOrganicPalette(0, 1, 1, 0, $0.baseAddress)
+                                } : -1
+                                let brightness = NotchLightBrightness(time: reduceMotion ? nil : time,
+                                                                      variation: 0.21)
+                                let left = CGPoint(x: frame.minX, y: frame.midY), right = CGPoint(x: frame.maxX, y: frame.midY)
+                                let gradient: GraphicsContext.Shading
+                                if waiting && paletteStatus == 0 {
+                                    let stops = (0..<41).map { index in
+                                        let location = CGFloat(index) / 40
+                                        return Gradient.Stop(color: Color(red: palette[index * 3], green: palette[index * 3 + 1],
+                                                                          blue: palette[index * 3 + 2]).opacity(brightness.at(location)),
+                                                             location: location)
+                                    }
+                                    gradient = .linearGradient(Gradient(stops: stops), startPoint: CGPoint(x: frame.minX, y: frame.midY), endPoint: CGPoint(x: frame.maxX, y: frame.midY))
+                                } else {
+                                    let tint = playingMusic && !active ? Color(nsColor: model.mediaLightColor) : styleTint
+                                    gradient = .linearGradient(brightness.gradient(tint, opacity: 1, fadesAtEnds: false),
+                                                               startPoint: left, endPoint: right)
+                                }
+                                drawFloatingHalo(in: context, path: path, shading: gradient,
+                                                 intensity: showsIdle || active ? 0.45 : 0.22,
+                                                 active: showsIdle || active, thickness: strokeScale, reach: reach)
+                            }
+                        }
+                        .opacity(showsIdle ? idleBrightness.opacity : 1)
+                        .animation(notchLightFadeAnimation(reduceMotion), value: idleBrightness.opacity)
+                        .id("\(ambientMode)-\(lightStyle)")
+                        .transition(.opacity)
+                        if showsMusicRipple {
+                            Canvas { context, _ in
+                                let intensity = musicRippleIntensity(at: time, spectrum: spectrumIntensity)
+                                let tint = Color(nsColor: musicCrestColor(model.mediaLightColor))
+                                let spread = 0.08 * reach
+                                var ripple = context
+                                ripple.addFilter(.blur(radius: 3 * reach))
+                                for offset in [0.0, 0.5] {
+                                    let phase = musicRipplePhase(time: time, offset: offset)
+                                    var pair = Path()
+                                    for center in [0.5 - phase * 0.48, 0.5 + phase * 0.48] {
+                                        pair.addPath(progressPath.trimmedPath(from: max(0, center - spread), to: min(1, center + spread)))
+                                    }
+                                    ripple.stroke(pair, with: .color(tint.opacity((1 - phase * 0.7) * intensity * 0.34)),
+                                                  style: StrokeStyle(lineWidth: 6 * strokeScale, lineCap: .round, lineJoin: .round))
+                                }
+                            }
+                            .transition(.opacity)
+                        }
+                        if showsMusicProgress {
+                            Canvas { context, _ in
+                                let fraction = rustMusicProgressFraction(model.currentMediaElapsed(at: time), model.mediaDuration)
+                                if fraction >= 0 {
+                                    drawMusicProgress(context: &context, path: progressPath, progress: CGFloat(fraction),
+                                                      tint: model.mediaLightColor, thickness: strokeScale)
+                                }
+                            }
+                            .transition(.opacity)
+                        }
+                        if let dictationColors {
+                            Canvas { context, _ in
+                                drawDictationAurora(context: &context, path: progressPath, notchWidth: frame.width,
+                                                    level: model.dictationLevel, time: dictationTime, thickness: strokeScale,
+                                                    colors: dictationColors, reach: reach, edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth)
+                            }
+                            .transition(.opacity)
+                        }
+                        if receiving {
+                            Canvas { context, _ in
+                                let elapsed = receivingLightElapsed(started: model.receivingFileStarted, now: time)
+                                drawReceivingTide(context: &context, contour: progressPath, edge: progressPath, elapsed: elapsed,
+                                                  progress: model.receivingFileProgress, held: reduceMotion || elapsed >= 2,
+                                                  reduceMotion: reduceMotion, thickness: strokeScale,
+                                                  surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle),
+                                                  tint: waveColors.tint(for: nil), edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth)
+                            }
+                            .transition(.opacity)
+                        }
+                        if timerEnabled {
+                            TimerNotchLight(model: model, thickness: strokeScale, edgeMaskWidth: FloatingIslandOutsideMask.edgeWidth) { _ in progressPath }
+                                .transition(.opacity)
+                        }
+                        let corners = FloatingIslandShape(radius: radius).cornerMetrics(in: frame)
+                        if let corners {
+                            let travel = corners.shoulder + corners.side + corners.arc
+                            if shelfHover {
+                                Canvas { context, _ in
                                     drawShelfHover(context: &context, path: progressPath, travel: travel, time: time,
                                                    thickness: strokeScale, reduceMotion: reduceMotion)
                                 }
-                                if let shelfCatch {
+                                .transition(.opacity)
+                            }
+                            if let shelfCatch {
+                                Canvas { context, _ in
                                     drawShelfCatch(context: &context, path: progressPath, travel: travel, zone: shelfCatch.zone,
                                                    elapsed: max(0, time - shelfCatch.started), thickness: strokeScale, reduceMotion: reduceMotion)
                                 }
+                                .id(shelfCatch.id)
+                                .transition(.opacity)
                             }
-                            for cue in cues {
+                        }
+                        ForEach(cues) { cue in
+                            Canvas { context, _ in
                                 drawFloatingCue(cue, context: &context, openContour: progressPath, thickness: strokeScale,
                                                 time: time, reduceMotion: reduceMotion, musicTint: model.mediaLightColor) { corners }
                             }
+                            .opacity(notchLightFadeEnvelope(elapsed: cue.elapsed(at: time), duration: cue.duration))
+                            .transition(.asymmetric(insertion: .identity, removal: .opacity))
                         }
                     }
+                    .animation(notchLightFadeAnimation(reduceMotion), value: ambientMode)
+                    .animation(notchLightFadeAnimation(reduceMotion), value: lightStyle)
+                    .animation(notchLightFadeAnimation(reduceMotion), value: [showsMusicProgress, showsMusicRipple, dictating, receiving, timerEnabled, shelfHover])
+                    .animation(notchLightFadeAnimation(reduceMotion), value: cues.map(\.id))
+                    .animation(notchLightFadeAnimation(reduceMotion), value: shelfCatch?.id)
+                    .opacity(profile.intensity)
+                    .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: false).fill(style: FillStyle(eoFill: true)))
+                    .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: true).fill(style: FillStyle(eoFill: true)))
+                    .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
+                    .allowsHitTesting(false).accessibilityHidden(true)
                 }
-                .opacity(profile.intensity)
-                .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: false).fill(style: FillStyle(eoFill: true)))
-                .mask(FloatingIslandOutsideMask(frame: frame, radius: radius, edgeOnly: true).fill(style: FillStyle(eoFill: true)))
-                .modifier(PhysicalNotchExclusion(width: model.cameraExclusion, height: model.cameraHeight))
-                .allowsHitTesting(false).accessibilityHidden(true)
+                .transition(.opacity)
             }
         }
+        .animation(notchLightFadeAnimation(reduceMotion), value: enabled)
+        .animation(notchLightFadeAnimation(reduceMotion), value: model.hoverSuspended)
+        .opacity(model.notchLightingVisible ? 1 : 0)
+        .animation(notchLightFadeAnimation(reduceMotion), value: model.notchLightingVisible)
     }
 }
 
@@ -2709,6 +2791,7 @@ struct AnimatedNotchAmbientLight: View {
     @AppStorage("rium.light.reminderAdded") private var reminderLight = true
     @AppStorage("rium.light.thickness") private var thickness = 0.6
     @AppStorage("rium.light.width") private var lightWidth = "extraLarge"
+    private var idleBrightness = IdleLightSettings()
 
     var body: some View {
         let enabledCues = model.visibleLightCues.filter { cue in
@@ -2733,76 +2816,85 @@ struct AnimatedNotchAmbientLight: View {
         // Keep the compact layer mounted so its opacity can follow the shell.
         let expandedForLight = compactLightOpacity == nil && model.expanded
         let compactLightPaused = compactLightOpacity == 0 && !model.notchGeometryInMotion
-        let compactTransition: AnyTransition = compactLightOpacity.map { $0 < 1 ? .identity : .opacity } ?? .opacity
+        let fade = notchLightFadeAnimation(reduceMotion)
+        let showsMusicProgress = musicLight && musicProgressLight && model.showsMusicProgress
+        let showsDictation = dictationLight && model.dictationDisplayActive
+        let showsReceiving = airDropLight && model.receivingFile
+        let showsShelfHover = model.fileDragActive && (shelfLight || airDropLight)
+        let shelfCatch = model.shelfCatchCue.flatMap { cue in
+            shelfCatchLightEnabled(zone: cue.zone, light: lightEnabled, shelf: shelfLight, airDrop: airDropLight) ? cue : nil
+        }
         let mode: AmbientLightMode = lightEnabled ? ambientLightMode(expanded: expandedForLight, agentActive: agentLight && state.active, musicPlaying: musicLight && model.mediaLightPlaying, eventActive: eventActive) : .off
-        let agentVariant = agentAmbientVariant(waiting: state.waiting, question: state.question, acting: state.acting)
+        let agentVariant = mode == .agent
+            ? agentAmbientVariant(waiting: state.waiting, question: state.question, acting: state.acting)
+            : .working
         let profile = NotchLightProfile(thickness)
         let widthScale = profile.thickness
         let lighting = GeometryReader { geometry in
             // Allow room for the lower question halo and its blur around the contour.
             let glowHeight = min(geometry.size.height, notchHeight + 2 * NotchContainer.lightPadding)
-            let armRun = ambientArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width)
             let tint = NotchLightColor.color(lightBaseColor)
-            if mode == .idle || (mode == .music && (compactLightOpacity ?? 1) < 1) {
-                contourFrames(every: 1.0 / 20.0) { time in
-                    NotchIdleLightFrame(time: time,
-                                        thickness: widthScale, armRun: armRun, notchSize: notchSize,
-                                        corners: corners, tint: tint, lightStyle: lightStyle)
-                }
-                .frame(height: glowHeight, alignment: .top)
-                .opacity(mode == .music ? 1 - (compactLightOpacity ?? 1) : 1)
-                .transition(compactTransition)
-            }
-            if mode == .agent {
-                let waiting = state.waiting
-                let usesCustomStyle = usesCustomAgentLight(lightStyle, waiting: waiting)
-                let agentArmRun = agentLightArmRun(preset: lightWidth, screenWidth: geometry.size.width,
-                    notch: notchSize.width, collapsed: model.collapsedNotchSize.width,
-                    expanded: model.expandedNotchSize.width + 72, reachesScreenEdge: !usesCustomStyle)
-                let question = state.question
-                let acting = state.acting
-                // Keep a continuous contour under the animated accent while it resizes.
-                NotchIdleLightFrame(time: nil, thickness: widthScale, armRun: agentArmRun,
-                                    notchSize: notchSize, corners: corners, tint: waiting ? .orange : tint,
-                                    lightStyle: "classic", isAgentUnderlay: true)
-                    .frame(height: glowHeight, alignment: .top)
-                    .opacity(0.64)
-                Group {
-                    if usesCustomStyle {
-                        NotchStyleAccent(style: lightStyle, tint: tint,
-                                         notchSize: notchSize, armRun: agentArmRun, strength: acting ? 1 : 0.78,
-                                         thickness: widthScale, corners: corners, morphTime: morphTime)
-                            .modifier(ContourSurfaceAdaptation(enabled: model.menuBarIsLight))
-                    } else {
-                        contourFrames(every: 1.0 / 60.0) { time in
-                            NotchAgentLightFrame(tint: waiting ? .orange : tint, time: time, thickness: widthScale, armRun: agentArmRun, acting: acting, thinking: !acting && !waiting, question: question, approval: waiting && !question, notchSize: notchSize, edgeToEdge: lightWidth == "extraLarge", corners: corners, onLightSurface: model.menuBarIsLight)
+            let showsIdle = mode == .idle || (mode == .music && (compactLightOpacity ?? 1) < 1)
+            let idleOpacity = mode == .music ? 1 - (compactLightOpacity ?? 1) : 1
+            ZStack(alignment: .top) {
+                if mode == .agent || showsIdle {
+                    let waiting = mode == .agent && state.waiting
+                    let usesCustomStyle = usesCustomAgentLight(lightStyle, waiting: waiting)
+                    let agentArmRun = agentLightArmRun(preset: lightWidth, screenWidth: geometry.size.width,
+                        notch: notchSize.width, collapsed: model.collapsedNotchSize.width,
+                        expanded: model.expandedNotchSize.width + 72, reachesScreenEdge: !usesCustomStyle)
+                    let question = waiting && state.question
+                    let acting = mode == .agent && state.acting
+                    ZStack(alignment: .top) {
+                        // Keep a continuous contour under the animated accent while it resizes.
+                        NotchIdleLightFrame(time: nil, thickness: widthScale, armRun: agentArmRun,
+                                            notchSize: notchSize, corners: corners, tint: waiting ? .orange : tint,
+                                            lightStyle: "classic", isAgentUnderlay: true)
+                            .frame(height: glowHeight, alignment: .top)
+                            .opacity(0.64)
+                        Group {
+                            if usesCustomStyle {
+                                NotchStyleAccent(style: lightStyle, tint: tint,
+                                                 notchSize: notchSize, armRun: agentArmRun, strength: acting ? 1 : 0.78,
+                                                 thickness: widthScale, corners: corners, morphTime: morphTime)
+                                    .modifier(ContourSurfaceAdaptation(enabled: model.menuBarIsLight))
+                            } else {
+                                contourFrames(every: showsIdle ? 1.0 / 20.0 : 1.0 / 60.0) { time in
+                                    NotchAgentLightFrame(tint: waiting ? .orange : tint, time: time, thickness: widthScale, armRun: agentArmRun, acting: acting, thinking: !acting && !waiting, question: question, approval: waiting && !question, notchSize: notchSize, edgeToEdge: lightWidth == "extraLarge", corners: corners, onLightSurface: model.menuBarIsLight)
+                                }
+                            }
                         }
+                        .frame(height: usesCustomStyle ? geometry.size.height : glowHeight, alignment: .top)
+                        .id(agentVariant)
+                        .transition(.opacity)
                     }
+                    .opacity(showsIdle ? idleOpacity * idleBrightness.opacity : 1)
+                    .transition(.opacity)
                 }
-                .frame(height: usesCustomStyle ? geometry.size.height : glowHeight, alignment: .top)
-                .id(agentVariant)
-                .transition(.opacity)
-            } else if mode == .music {
-              let musicArm = musicArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width)
-              let frame = NotchMusicLightFrame(tint: model.mediaLightColor, time: nil, thickness: widthScale,
-                                               armRun: musicArm, notchSize: notchSize, corners: corners,
-                                               onLightSurface: model.menuBarIsLight)
-              Group {
-                if reduceMotion || compactLightPaused {
-                    frame
-                } else {
-                    AnimatedMusicContour(spectrum: model.musicSpectrum, frame: frame)
+                if mode == .music {
+                  let musicArm = musicArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width)
+                  let frame = NotchMusicLightFrame(tint: model.mediaLightColor, time: nil, thickness: widthScale,
+                                                   armRun: musicArm, notchSize: notchSize, corners: corners,
+                                                   onLightSurface: model.menuBarIsLight)
+                  Group {
+                    if reduceMotion || compactLightPaused {
+                        frame
+                    } else {
+                        AnimatedMusicContour(spectrum: model.musicSpectrum, frame: frame)
+                    }
+                  }
+                  .frame(height: glowHeight, alignment: .top)
+                  .opacity(compactLightOpacity ?? 1)
+                  .transition(.opacity)
                 }
-              }
-              .frame(height: glowHeight, alignment: .top)
-              .opacity(compactLightOpacity ?? 1)
-              .transition(compactTransition)
             }
+            .id(lightStyle)
+            .transition(.opacity)
         }
         .overlay {
             GeometryReader { geometry in
                 if lightEnabled {
-                    if musicLight && musicProgressLight && model.showsMusicProgress {
+                    if showsMusicProgress {
                         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { _ in
                             let elapsed = model.currentMediaElapsed(at: ProcessInfo.processInfo.systemUptime)
                             let fraction = rustMusicProgressFraction(elapsed, model.mediaDuration)
@@ -2815,12 +2907,14 @@ struct AnimatedNotchAmbientLight: View {
                                 }
                             }
                         }
+                        .transition(.opacity)
                     }
-                    if dictationLight && model.dictationDisplayActive {
+                    if showsDictation {
                         DictationNotchLight(notchSize: notchSize, level: model.dictationLevel,
                                             thickness: widthScale, armRun: ambientArmRun(preset: lightWidth,
                                                 screenWidth: geometry.size.width, notch: notchSize.width), corners: corners)
                             .modifier(ContourSurfaceAdaptation(enabled: model.menuBarIsLight))
+                            .transition(.opacity)
                     }
                     if timerLight {
                         TimerNotchLight(model: model, thickness: widthScale) { rect in
@@ -2828,8 +2922,9 @@ struct AnimatedNotchAmbientLight: View {
                                 .applying(CGAffineTransform(translationX: rect.midX - notchSize.width / 2, y: rect.minY))
                         }
                         .modifier(ContourSurfaceAdaptation(enabled: model.menuBarIsLight))
+                        .transition(.opacity)
                     }
-                    if airDropLight && model.receivingFile {
+                    if showsReceiving {
                         let width = notchSize.width, height = notchSize.height
                         let room = max(0, (geometry.size.width - width) / 2)
                         let arm = interpolatedLightReach(lightWidth, narrow: min(76, room), widest: max(0, room - 20))
@@ -2837,6 +2932,7 @@ struct AnimatedNotchAmbientLight: View {
                                             thickness: widthScale, progress: model.receivingFileProgress, started: model.receivingFileStarted,
                                             surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle), corners: corners)
                             .position(x: geometry.size.width / 2, y: (height + NotchContainer.lightPadding) / 2)
+                            .transition(.opacity)
                     }
                     ForEach(enabledCues) { cue in
                         let width = notchSize.width
@@ -2848,21 +2944,28 @@ struct AnimatedNotchAmbientLight: View {
                                                               notchWidth: width, fallback: arm),
                                         musicTint: model.mediaLightColor, corners: corners, onLightSurface: model.menuBarIsLight)
                             .position(x: geometry.size.width / 2, y: notchEventLightHeight(kind: cue.kind, notchHeight: height) / 2)
+                            .transition(.asymmetric(insertion: .identity, removal: .opacity))
                     }
                     let shelfArm = ambientArmRun(preset: lightWidth, screenWidth: geometry.size.width, notch: notchSize.width)
-                    if model.fileDragActive && (shelfLight || airDropLight) {
+                    if showsShelfHover {
                         ShelfDragHoverLight(notchSize: notchSize, corners: corners, arm: shelfArm, thickness: widthScale)
+                            .transition(.opacity)
                     }
-                    if let cue = model.shelfCatchCue,
-                       shelfCatchLightEnabled(zone: cue.zone, light: lightEnabled, shelf: shelfLight, airDrop: airDropLight) {
-                        ShelfCatchLight(cue: cue, notchSize: notchSize, corners: corners, arm: shelfArm, thickness: widthScale)
+                    if let shelfCatch {
+                        ShelfCatchLight(cue: shelfCatch, notchSize: notchSize, corners: corners, arm: shelfArm, thickness: widthScale)
+                            .id(shelfCatch.id)
+                            .transition(.opacity)
                     }
                 }
             }
         }
-        // shortcut: mapping the reference glow transition onto persistent modes needs visual comparison.
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: mode)
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .timingCurve(0.32, 0, 0.23, 1, duration: 0.34), value: agentVariant)
+        .animation(fade, value: mode)
+        .animation(fade, value: idleBrightness.opacity)
+        .animation(fade, value: agentVariant)
+        .animation(fade, value: lightStyle)
+        .animation(fade, value: [lightEnabled, showsMusicProgress, showsDictation, timerLight, showsReceiving, showsShelfHover])
+        .animation(fade, value: enabledCues.map(\.id))
+        .animation(fade, value: shelfCatch?.id)
         .opacity(profile.intensity)
         let physicalOutline = CGSize(width: NotchCorners.physicalOutlineWidth(cameraWidth: model.cameraExclusion),
                                      height: model.cameraHeight)
@@ -2879,6 +2982,8 @@ struct AnimatedNotchAmbientLight: View {
         }
         .modifier(PhysicalNotchExclusion(width: shellCoversPhysicalNotch ? 0 : model.cameraExclusion,
                                          height: model.cameraHeight))
+        .opacity(model.notchLightingVisible ? 1 : 0)
+        .animation(fade, value: model.notchLightingVisible)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -3022,36 +3127,42 @@ struct TimerNotchLight: View {
     let contour: (CGRect) -> Path
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        if model.showsTimerAlarmLight {
-            let color = (model.timerAlarmPhase ?? model.timerPhase).lightColor
-            TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0)) { _ in
-                let now = ProcessInfo.processInfo.systemUptime
-                let fraction = CGFloat(model.timerAlarmProgress(at: now))
-                let pulse = rustTimerPulse(now, reduceMotion ? 1 : 0)
-                ZStack {
-                    TimerNotchGauge(fraction: fraction, contour: contour)
-                        .stroke(color.opacity(pulse), style: StrokeStyle(lineWidth: 2 * thickness + edgeMaskWidth, lineCap: .round))
-                        .shadow(color: color.opacity(pulse * 0.6), radius: 5)
-                    if !reduceMotion && fraction > 0 {
-                        TimerContourCrests(fraction: fraction, color: color, thickness: thickness, contour: contour)
+        ZStack {
+            if model.showsTimerAlarmLight {
+                let color = (model.timerAlarmPhase ?? model.timerPhase).lightColor
+                TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0)) { _ in
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let fraction = CGFloat(model.timerAlarmProgress(at: now))
+                    let pulse = rustTimerPulse(now, reduceMotion ? 1 : 0)
+                    ZStack {
+                        TimerNotchGauge(fraction: fraction, contour: contour)
+                            .stroke(color.opacity(pulse), style: StrokeStyle(lineWidth: 2 * thickness + edgeMaskWidth, lineCap: .round))
+                            .shadow(color: color.opacity(pulse * 0.6), radius: 5)
+                        if !reduceMotion && fraction > 0 {
+                            TimerContourCrests(fraction: fraction, color: color, thickness: thickness, contour: contour)
+                        }
                     }
                 }
-            }
-        } else if [1, 2].contains(model.timerState), let duration = model.timerDuration {
-            let fraction = timerFraction(model.timerRemaining, duration)
-            if fraction >= 0 {
-                ZStack {
-                    TimerNotchGauge(fraction: CGFloat(fraction), contour: contour)
-                        .stroke(model.timerPhase.lightColor.opacity(model.timerState == 2 ? 0.24 : 0.45),
-                                style: StrokeStyle(lineWidth: 1.5 * thickness + edgeMaskWidth, lineCap: .round))
-                    if model.timerState == 1 && !reduceMotion {
-                        TimerContourCrests(fraction: CGFloat(fraction),
-                                           color: model.timerPhase.lightColor, thickness: thickness, contour: contour)
+                .transition(.opacity)
+            } else if [1, 2].contains(model.timerState), let duration = model.timerDuration {
+                let fraction = timerFraction(model.timerRemaining, duration)
+                if fraction >= 0 {
+                    ZStack {
+                        TimerNotchGauge(fraction: CGFloat(fraction), contour: contour)
+                            .stroke(model.timerPhase.lightColor.opacity(model.timerState == 2 ? 0.24 : 0.45),
+                                    style: StrokeStyle(lineWidth: 1.5 * thickness + edgeMaskWidth, lineCap: .round))
+                        if model.timerState == 1 && !reduceMotion {
+                            TimerContourCrests(fraction: CGFloat(fraction),
+                                               color: model.timerPhase.lightColor, thickness: thickness, contour: contour)
+                        }
                     }
+                    .animation(reduceMotion ? nil : .linear(duration: 0.8), value: fraction)
+                    .transition(.opacity)
                 }
-                .animation(reduceMotion ? nil : .linear(duration: 0.8), value: fraction)
             }
         }
+        .animation(notchLightFadeAnimation(reduceMotion), value: model.showsTimerAlarmLight)
+        .animation(notchLightFadeAnimation(reduceMotion), value: model.timerState)
     }
 }
 

@@ -40,7 +40,7 @@ open '../Rium Notch.app'
 
 <details><summary><strong>추가 기능</strong></summary>
 
-일정, 받아쓰기, AirDrop 및 스크린샷 감시, 텔레프롬프터가 포함되어 있습니다. 일부 기능은 macOS 권한과 별도의 설정이 필요합니다.
+Google Calendar와 Google Tasks, 받아쓰기, AirDrop 및 스크린샷 감시, 텔레프롬프터가 포함되어 있습니다. 일부 기능은 macOS 권한과 별도의 설정이 필요합니다.
 
 </details>
 
@@ -57,6 +57,8 @@ open '../Rium Notch.app'
 ```text
 노치에 포인터 올리기 → 원하는 탭 선택 → 설정에서 사용할 기능 조정
 ```
+
+**일정과 할 일**에서 **Google 로그인**을 누르면 Google Calendar와 Google Tasks를 한 계정에 연결합니다. 처음 연결할 때는 Calendar API와 Tasks API를 활성화한 Google Cloud 프로젝트의 [데스크톱 앱 OAuth JSON](https://developers.google.com/identity/protocols/oauth2/native-app#creatingcred)을 선택합니다. 로그인과 권한 허용은 브라우저에서 한 번 진행합니다. 설정 파일과 로그인 정보는 이 Mac의 키체인에 보관합니다.
 
 ## 적용 범위와 제한
 

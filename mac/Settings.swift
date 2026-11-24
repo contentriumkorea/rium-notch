@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import Speech
-import EventKit
 import ApplicationServices
 
 enum SettingsPage: String, CaseIterable, Identifiable {
@@ -114,6 +113,9 @@ struct SettingsView: View {
     @AppStorage("rium.light.agent") private var agentLight = true
     @AppStorage("rium.light.agentScreenWave") private var agentScreenWave = true
     @AppStorage("rium.light.agentWaveMode") private var agentWaveMode = "balanced"
+    @AppStorage("rium.light.waveStyle") private var waveStyle = "notch"
+    private var waveColors = ScreenWaveColors()
+    private var idleBrightness = IdleLightSettings()
     @AppStorage("rium.light.dictation") private var dictationLight = true
     @AppStorage("rium.light.music") private var musicLight = true
     @AppStorage("rium.light.musicProgress") private var musicProgressLight = true
@@ -555,8 +557,6 @@ struct SettingsView: View {
                         dictationPermissionRow("음성 인식", status: speechPermissionStatus(dictation.access.speech), permission: .speech)
                         permissionRow("입력 모니터링", status: dictation.access.inputMonitoring ? "앱에서 확인됨" : "시스템 설정에서 확인",
                                       anchor: "Privacy_ListenEvent")
-                        permissionRow("캘린더", status: eventPermissionStatus(.event), anchor: "Privacy_Calendars")
-                        permissionRow("미리 알림", status: eventPermissionStatus(.reminder), anchor: "Privacy_Reminders")
                         permissionRow("파일 및 폴더", status: "시스템 설정에서 확인", anchor: "Privacy_FilesAndFolders")
                         permissionRow("전체 디스크 접근", status: "시스템 설정에서 확인", anchor: "Privacy_AllFiles")
                     }
@@ -670,21 +670,18 @@ struct SettingsView: View {
                 Text("나만의 빛").font(.system(size: 20, weight: .semibold))
                 Text("평소와 에이전트 작업 중에 표시할 노치 조명을 선택합니다.").font(.system(size: 13)).foregroundStyle(.secondary)
             }
+            lightDimensions
             ColorPicker("기본 조명 색상", selection: Binding(
                 get: { NotchLightColor.color(lightBaseColor) },
                 set: { if let rgb = NotchLightColor.rgb($0) { lightBaseColor = rgb } }
             ), supportsOpacity: false)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
                 lightPreview("클래식", value: "classic")
                 lightPreview("픽셀", value: "pixel")
-                lightPreview("볼륨 조명", value: "volume")
-                lightPreview("광선", value: "rays")
-                lightPreview("생체 발광", value: "bio")
-                lightPreview("크리스털 프리즘", value: "prism")
-                lightPreview("구름", value: "cloud")
             }
             lightControls
         case .effects:
+            lightDimensions
             lightControls
         }
     }
@@ -758,17 +755,56 @@ struct SettingsView: View {
             .accessibilityValue(selected ? "선택됨" : "선택 안 됨")
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
+    private var lightDimensions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("빛 너비", selection: $lightWidth) {
+                Text("좁게").tag("narrow"); Text("보통").tag("medium"); Text("넓게").tag("wide"); Text("아주 넓게").tag("extraLarge")
+            }.pickerStyle(.segmented)
+            HStack {
+                Text("빛 두께")
+                Slider(value: $lightThickness, in: 0.5...2, step: 0.05).accessibilityLabel("빛 두께")
+                Text("\(Int((lightThickness * 100).rounded()))%").monospacedDigit().frame(width: 55, alignment: .trailing)
+            }
+        }.disabled(!lightEnabled)
+    }
     private var lightControls: some View {
             SettingsCard(title: "노치 조명") {
                 Toggle("노치 조명", isOn: $lightEnabled)
                 Group {
+                    HStack {
+                        Text("대기 조명 밝기")
+                        Slider(value: Binding(get: { idleBrightness.percent }, set: { idleBrightness.percent = $0 }),
+                               in: 0...100, step: 1)
+                            .accessibilityLabel("대기 조명 밝기")
+                        Text(idleBrightness.percent.formatted(.percent.scale(1).precision(.fractionLength(0))))
+                            .monospacedDigit().frame(width: 55, alignment: .trailing)
+                    }
+                    Text("100%는 AI 작업 중 밝기와 같습니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("화면 파동 방식", selection: $waveStyle) {
+                        Text("노치에서 퍼짐").tag("notch")
+                        Text("화면 테두리 한 바퀴").tag("perimeter")
+                    }.pickerStyle(.segmented).disabled(!lightEnabled)
+                    Picker("화면 파동 색상", selection: waveColors.$mode) {
+                        Text("자동").tag(ScreenWaveColorMode.automatic)
+                        Text("노치 기본색").tag(ScreenWaveColorMode.notch)
+                        Text("직접 선택").tag(ScreenWaveColorMode.custom)
+                    }
+                    if waveColors.mode == .custom {
+                        ColorPicker("파동 색상 선택", selection: Binding(
+                            get: { NotchLightColor.color(waveColors.customRGB) },
+                            set: { if let rgb = NotchLightColor.rgb($0) { waveColors.customRGB = rgb } }
+                        ), supportsOpacity: false)
+                    }
                     Toggle("에이전트 상태 조명", isOn: $agentLight)
                     Toggle("에이전트 상태 변화 시 화면 파동", isOn: $agentScreenWave).disabled(!agentLight)
                     Picker("에이전트 화면 파동 빈도", selection: $agentWaveMode) {
                         Text("균형").tag("balanced")
                         Text("모든 변화").tag("every")
                     }.pickerStyle(.segmented).disabled(!agentLight || !agentScreenWave)
-                    Text(lightStyle == "classic"
+                    Text(waveStyle == "perimeter"
+                         ? "에이전트, 복사와 AirDrop 등의 화면 파동이 화면 가장자리를 따라 한 바퀴 돕니다."
+                         : lightStyle == "classic"
                          ? "클래식에서는 에이전트가 작업을 마칠 때 화면에 빛이 퍼집니다."
                          : "에이전트가 시작하거나 확인을 요청하거나 작업을 마칠 때 빛이 퍼집니다.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -797,16 +833,8 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("전원과 배터리 경고 빛 표시", isOn: $batteryLight)
                     Toggle("일정 추가 시 빛 표시", isOn: $calendarLight)
-                    Toggle("미리 알림 추가 시 빛 표시", isOn: $reminderLight)
+                    Toggle("Google Tasks 추가 시 빛 표시", isOn: $reminderLight)
                     Toggle("이벤트 조명에 광선과 입자 추가", isOn: $raysLight).disabled(lightStyle == "classic")
-                    Picker("빛 너비", selection: $lightWidth) {
-                        Text("좁게").tag("narrow"); Text("보통").tag("medium"); Text("넓게").tag("wide"); Text("아주 넓게").tag("extraLarge")
-                    }.pickerStyle(.segmented)
-                    HStack {
-                        Text("빛 두께")
-                        Slider(value: $lightThickness, in: 0.5...2, step: 0.05).accessibilityLabel("빛 두께")
-                        Text("\(Int((lightThickness * 100).rounded()))%").monospacedDigit().frame(width: 55, alignment: .trailing)
-                    }
                 }.disabled(!lightEnabled)
                 Text("모션 줄이기를 켜면 움직임을 줄입니다.").font(.caption).foregroundStyle(.secondary)
             }
@@ -854,16 +882,6 @@ private func speechPermissionStatus(_ status: SFSpeechRecognizerAuthorizationSta
     case .restricted: return "시스템에서 제한됨"
     @unknown default: return "확인할 수 없음"
     }
-}
-
-private func eventPermissionStatus(_ type: EKEntityType) -> String {
-    let status = EKEventStore.authorizationStatus(for: type)
-    if status == .fullAccess { return "전체 접근 허용됨" }
-    if status == .writeOnly { return "추가만 허용됨" }
-    if status == .notDetermined { return "요청 전" }
-    if status == .denied { return "허용 안 됨" }
-    if status == .restricted { return "시스템에서 제한됨" }
-    return "확인할 수 없음"
 }
 
 // Drawn locally for the settings screen; the original app's preview assets

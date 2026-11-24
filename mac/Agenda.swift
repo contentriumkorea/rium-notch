@@ -1,6 +1,6 @@
 import Foundation
-import EventKit
 import AppKit
+import UniformTypeIdentifiers
 
 func eventIntersectsCalendarDay(start: Date, end: Date, dayStart: Date, dayEnd: Date) -> Bool {
     guard dayEnd > dayStart, end >= start else { return false }
@@ -18,65 +18,127 @@ func eventIsRemainingToday(start: Date, end: Date, now: Date, calendar: Calendar
     return start < tomorrow
 }
 
-private final class ReminderForm: NSObject {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 132))
-    let title = NSTextField(frame: NSRect(x: 0, y: 104, width: 300, height: 24))
-    let dateEnabled = NSButton(checkboxWithTitle: "날짜 지정", target: nil, action: nil)
-    let timeEnabled = NSButton(checkboxWithTitle: "시간 지정", target: nil, action: nil)
-    let date = NSDatePicker(frame: NSRect(x: 0, y: 42, width: 300, height: 24))
-    let location = NSTextField(frame: NSRect(x: 0, y: 10, width: 300, height: 24))
+private struct GoogleCalendarEntry: Decodable {
+    let id: String
+    let backgroundColor: String?
+    let primary: Bool?
+    let selected: Bool?
+}
 
-    override init() {
-        super.init()
-        title.placeholderString = "미리 알림 제목"
-        location.placeholderString = "장소 메모 (선택 사항)"
-        dateEnabled.frame = NSRect(x: 0, y: 74, width: 130, height: 22)
-        timeEnabled.frame = NSRect(x: 145, y: 74, width: 130, height: 22)
-        dateEnabled.target = self; dateEnabled.action = #selector(update)
-        timeEnabled.target = self; timeEnabled.action = #selector(update)
-        date.datePickerStyle = .textFieldAndStepper; date.dateValue = Date().addingTimeInterval(3600)
-        let controls: [NSView] = [title, dateEnabled, timeEnabled, date, location]
-        for control in controls { view.addSubview(control) }
-        update()
+private struct GoogleCalendarEvent: Decodable {
+    struct Bound: Decodable {
+        let date: String?
+        let dateTime: String?
+        func localDate(in calendar: Calendar) -> Date? {
+            if let dateTime { return googleInstant(dateTime) }
+            return date.flatMap { googleDay($0, in: calendar) }
+        }
+    }
+    let id: String
+    let summary: String?
+    let status: String?
+    let start: Bound?
+    let end: Bound?
+
+    func row(calendar: GoogleCalendarEntry, local: Calendar) -> AgendaModel.Item? {
+        guard status != "cancelled", let start, let end,
+              let first = start.localDate(in: local), let last = end.localDate(in: local), last >= first
+        else { return nil }
+        let allDay = start.date != nil
+        let color = calendar.backgroundColor.flatMap { parseCalendarColor($0) }
+        return .init(id: "\(calendar.id.count):\(calendar.id)\(id)", title: summary ?? "제목 없음",
+                     subtitle: allDay ? "종일" : first.formatted(date: .abbreviated, time: .shortened),
+                     start: first, end: last, allDay: allDay, color: color)
+    }
+}
+
+private struct GoogleTaskList: Decodable {
+    let id: String
+    let title: String?
+}
+
+private struct GoogleTask: Decodable {
+    let id: String
+    let title: String?
+    let due: String?
+    let status: String?
+    let deleted: Bool?
+
+    func row(in list: GoogleTaskList, calendar: Calendar) -> AgendaModel.Item? {
+        guard status != "completed", deleted != true else { return nil }
+        let date = due.flatMap { googleDay(String($0.prefix(10)), in: calendar) }
+        let label = list.title ?? ""
+        let subtitle = [label, date?.formatted(date: .abbreviated, time: .omitted) ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+        return .init(id: "\(list.id.count):\(list.id)\(id)", title: title ?? "제목 없음", subtitle: subtitle,
+                     start: date, taskLocation: .init(list: list.id, task: id), taskListTitle: list.title)
+    }
+}
+
+private func googleInstant(_ text: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = formatter.date(from: text) { return date }
+    formatter.formatOptions = .withInternetDateTime
+    return formatter.date(from: text)
+}
+
+private func googleDay(_ text: String, in calendar: Calendar) -> Date? {
+    let parts = text.split(separator: "-").compactMap { Int($0) }
+    guard parts.count == 3 else { return nil }
+    var gregorian = Calendar(identifier: .gregorian)
+    gregorian.timeZone = calendar.timeZone
+    return gregorian.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+}
+
+private func parseCalendarColor(_ text: String) -> NSColor? {
+    guard text.hasPrefix("#"), text.count == 7, let hex = UInt32(text.dropFirst(), radix: 16) else { return nil }
+    return NSColor(srgbRed: CGFloat(hex >> 16) / 255, green: CGFloat((hex >> 8) & 255) / 255,
+                   blue: CGFloat(hex & 255) / 255, alpha: 1)
+}
+
+struct GoogleAgendaWindow {
+    let calendar: Calendar
+    let now: Date
+    let day: DateInterval
+    let week: DateInterval
+    let month: DateInterval
+    let upcomingEnd: Date
+
+    init(now: Date, calendar: Calendar) {
+        self.calendar = calendar
+        self.now = now
+        day = calendar.dateInterval(of: .day, for: now) ?? DateInterval(start: now, duration: 86_400)
+        week = calendar.dateInterval(of: .weekOfYear, for: now) ?? day
+        month = calendar.dateInterval(of: .month, for: now) ?? day
+        upcomingEnd = calendar.date(byAdding: .day, value: 7, to: now) ?? week.end
     }
 
-    @objc private func update() {
-        let hasDate = dateEnabled.state == .on
-        timeEnabled.isEnabled = hasDate
-        date.isEnabled = hasDate
-        date.datePickerElements = hasDate && timeEnabled.state == .on ? [.yearMonthDay, .hourMinute] : [.yearMonthDay]
+    func datesWithEvents(_ rows: [AgendaModel.Item], interval: DateInterval) -> Set<Date> {
+        var day = interval.start
+        var result = Set<Date>()
+        while day < interval.end, let next = calendar.date(byAdding: .day, value: 1, to: day), next > day {
+            if rows.contains(where: { row in
+                guard let start = row.start, let end = row.end else { return false }
+                return eventIntersectsCalendarDay(start: start, end: end, dayStart: day, dayEnd: next)
+            }) { result.insert(day) }
+            day = next
+        }
+        return result
+    }
+
+    var query: [URLQueryItem] {
+        let formatter = ISO8601DateFormatter()
+        return [
+            .init(name: "timeMin", value: formatter.string(from: min(day.start, week.start, month.start))),
+            .init(name: "timeMax", value: formatter.string(from: max(upcomingEnd, week.end, month.end))),
+            .init(name: "singleEvents", value: "true"), .init(name: "orderBy", value: "startTime")
+        ]
     }
 }
 
-func reminderDueComponents(_ date: Date, includeTime: Bool, timeZone: TimeZone = .current) -> DateComponents {
-    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
-    let units: Set<Calendar.Component> = includeTime ? [.year, .month, .day, .hour, .minute] : [.year, .month, .day]
-    var components = calendar.dateComponents(units, from: date)
-    components.calendar = calendar
-    components.timeZone = includeTime ? timeZone : nil
-    return components
-}
-
-private func reminderDueDate(_ components: DateComponents?) -> Date? {
-    guard let components = components, components.year != nil, components.month != nil, components.day != nil else { return nil }
-    return (components.calendar ?? Calendar(identifier: .gregorian)).date(from: components)
-}
-
-private func reminderSubtitle(list: String, due: DateComponents?, date: Date?, formatter: DateFormatter) -> String {
-    guard let due, let date else { return list }
-    let style: DateFormatter.Style = due.hour == nil ? .none : .short
-    if formatter.timeStyle != style { formatter.timeStyle = style }
-    let zone = due.timeZone ?? .current
-    if formatter.timeZone != zone { formatter.timeZone = zone }
-    let label = formatter.string(from: date)
-    return list.isEmpty ? label : "\(list) · \(label)"
-}
-
-/// Access prompts are initiated only by the corresponding user action. Existing
-/// full-access grants can be refreshed without requesting access again.
 final class AgendaModel: ObservableObject {
-    enum Addition: Equatable { case event, reminder }
-    var onAdded: ((Addition) -> Void)?
+    enum Addition: Equatable { case event, task }
+    struct TaskLocation { let list: String; let task: String }
     struct Item: Identifiable {
         let id: String
         let title: String
@@ -85,334 +147,367 @@ final class AgendaModel: ObservableObject {
         var end: Date? = nil
         var allDay: Bool = false
         var color: NSColor? = nil
+        var taskLocation: TaskLocation? = nil
+        var taskListTitle: String? = nil
     }
+
+    var onAdded: ((Addition) -> Void)?
     @Published var events: [Item] = []
+    @Published var tasks: [Item] = []
     @Published private(set) var todayEvents: [Item] = []
     @Published private(set) var todayEventCount = 0
     @Published private(set) var weekEventDays: Set<Date> = []
     @Published private(set) var monthEventDays: Set<Date> = []
-    @Published private(set) var calendarAccess: EKAuthorizationStatus = .notDetermined
+    @Published private(set) var googleConnected = false
     @Published private(set) var calendarRequesting = false
-    var calendarReadable: Bool { calendarAccess == .fullAccess }
     @Published private(set) var calendarLoading = false
-    @Published var reminders: [Item] = []
-    @Published var calendarStatus = "일정 권한 필요"
-    @Published var remindersStatus = "미리 알림 권한 필요"
-    private lazy var store = EKEventStore()
-    private let calendarQueue = DispatchQueue(label: "app.rium.notch.calendar", qos: .utility)
-    private var changeObserver: NSObjectProtocol?
-    private var refreshWork: DispatchWorkItem?
-    private var calendarGeneration = 0
-    private(set) var reminderGeneration = 0
-    private let observationStarted = Date()
-    private var announcedAdditions: [String: Date] = [:]
-    private var lastReminderAccess: EKAuthorizationStatus?
+    @Published private(set) var mutationInProgress = false
+    @Published var calendarStatus = "Google 계정 연결 필요"
+    @Published var tasksStatus = "Google 계정 연결 필요"
+    var calendarReadable: Bool { googleConnected }
+    var calendarActionTitle: String { googleConnected ? "새로고침" : "Google 로그인" }
+    private var client: GoogleAgendaClient?
+    private var session: GoogleAgendaToken?
+    private var login: GoogleAgendaLogin?
+    private var started = false
+    private var refreshGeneration = 0
 
-    init(autoRefresh: Bool = true) {
-        if autoRefresh { start() }
-    }
+    init(autoRefresh: Bool = true) { if autoRefresh { start() } }
 
     func start() {
-        guard changeObserver == nil else { return }
-        changeObserver = NotificationCenter.default.addObserver(forName: .EKEventStoreChanged, object: store, queue: .main) { [weak self] _ in
-            guard let self = self else { return }
-            self.refreshWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.refreshAuthorized() }
-            self.refreshWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-        }
+        guard !started else { return }
+        started = true
+        client = GoogleAgendaKeychain.load(GoogleAgendaClient.self, account: "client")
+        if client != nil { session = GoogleAgendaKeychain.load(GoogleAgendaToken.self, account: "session") }
+        googleConnected = session != nil
         refreshAuthorized()
-    }
-
-    deinit {
-        refreshWork?.cancel()
-        if let changeObserver = changeObserver { NotificationCenter.default.removeObserver(changeObserver) }
-    }
-
-    func refreshAuthorized() {
-        refreshCalendarAccess()
-        lastReminderAccess = EKEventStore.authorizationStatus(for: .reminder)
-        if lastReminderAccess == .fullAccess { refreshReminders() }
-        else { clearReminders(status: "미리 알림 권한 필요") }
-    }
-
-    func refreshIfAuthorizationChanged() {
-        if EKEventStore.authorizationStatus(for: .event) != calendarAccess || EKEventStore.authorizationStatus(for: .reminder) != lastReminderAccess {
-            refreshAuthorized()
-        }
     }
 
     func invalidateToday() {
         todayEvents = []; todayEventCount = 0; weekEventDays = []; monthEventDays = []
     }
 
-    private func refreshCalendarAccess() {
-        let access = EKEventStore.authorizationStatus(for: .event)
-        if calendarAccess != access { calendarAccess = access }
-        guard !calendarRequesting else { return }
-        if calendarReadable {
-            refreshCalendar()
-        } else {
-            calendarGeneration += 1
-            events = []
-            invalidateToday()
-            calendarLoading = false
-            switch access {
-            case .denied, .writeOnly: calendarStatus = "시스템 설정에서 Rium Notch에 캘린더 전체 접근을 허용해 주세요"
-            case .restricted: calendarStatus = "이 Mac에서 캘린더 접근이 제한되어 있습니다"
-            default: calendarStatus = "일정 권한 필요"
-            }
-        }
-    }
-
-    var calendarActionTitle: String {
-        switch calendarAccess {
-        case .denied, .writeOnly: return "캘린더 설정 열기"
-        default: return "일정 불러오기"
-        }
-    }
-
     func loadCalendar() {
-        guard !calendarRequesting, !calendarLoading else { return }
-        refreshCalendarAccess()
-        switch calendarAccess {
-        case .fullAccess, .restricted:
-            return
-        case .denied, .writeOnly:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
-                NSWorkspace.shared.open(url)
-            }
-        default:
-            calendarRequesting = true
-            calendarStatus = "캘린더 접근 요청 중…"
-            NSApp.activate(ignoringOtherApps: true)
-            let store = self.store
-            calendarQueue.async { [weak self] in
-                store.requestFullAccessToEvents { _, error in
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        self.calendarRequesting = false
-                        self.refreshCalendarAccess()
-                        if error != nil && self.calendarAccess == .notDetermined {
-                            self.calendarStatus = "캘린더 접근을 요청하지 못했습니다. 다시 시도해 주세요"
-                        }
-                    }
+        guard !calendarRequesting, !calendarLoading, !mutationInProgress else { return }
+        if googleConnected { refreshAuthorized(); return }
+        if let client { signIn(client); return }
+        let panel = NSOpenPanel()
+        panel.title = "Google 데스크톱 OAuth 설정 가져오기"
+        panel.message = "Calendar와 Tasks API가 활성화된 Google Cloud 프로젝트의 데스크톱 앱 OAuth JSON을 선택하세요."
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        calendarRequesting = true
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard let self else { return }
+            self.calendarRequesting = false
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? .max) <= 131_072 else {
+                    throw GoogleAgendaError.configuration
+                }
+                guard let client = try? GoogleAgendaClient.configuration(from: Data(contentsOf: url)) else {
+                    throw GoogleAgendaError.configuration
+                }
+                try GoogleAgendaKeychain.save(client, account: "client")
+                self.client = client
+                self.signIn(client)
+            } catch { self.calendarStatus = error.localizedDescription }
+        }
+    }
+
+    private func signIn(_ client: GoogleAgendaClient) {
+        calendarRequesting = true
+        calendarStatus = "브라우저에서 Google 로그인 진행 중…"
+        let login = GoogleAgendaLogin()
+        self.login = login
+        do {
+            try login.start(client) { [weak self] result in
+                guard let self else { return }
+                self.login = nil
+                Task { @MainActor in
+                    defer { self.calendarRequesting = false }
+                    do {
+                        let (code, redirect, verifier) = try result.get()
+                        let session = try await client.exchange(code: code, redirect: redirect, verifier: verifier)
+                        try GoogleAgendaKeychain.save(session, account: "session")
+                        self.session = session
+                        self.googleConnected = true
+                        self.refreshAuthorized()
+                    } catch { self.calendarStatus = error.localizedDescription }
                 }
             }
+        } catch {
+            self.login = nil
+            calendarRequesting = false
+            calendarStatus = GoogleAgendaError.listener.localizedDescription
         }
     }
 
-    private func refreshCalendar() {
-        calendarGeneration += 1; let generation = calendarGeneration
+    func disconnectGoogle() {
+        guard !calendarRequesting, !mutationInProgress else { return }
+        do {
+            try GoogleAgendaKeychain.disconnect()
+            clearSession(status: "Google 계정 연결 필요")
+        } catch { calendarStatus = error.localizedDescription }
+    }
+
+    private func clearSession(status: String) {
+        refreshGeneration &+= 1
+        session = nil
+        googleConnected = false
+        calendarLoading = false
+        events = []; tasks = []; invalidateToday()
+        calendarStatus = status; tasksStatus = "Google 계정 연결 필요"
+    }
+
+    private func handleExpiredSession(_ error: Error) -> Bool {
+        guard case GoogleAgendaError.expired = error else { return false }
+        try? GoogleAgendaKeychain.disconnect()
+        clearSession(status: error.localizedDescription)
+        return true
+    }
+
+    func refreshAuthorized() {
+        guard let client, let session, !calendarLoading, !mutationInProgress else { return }
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let window = GoogleAgendaWindow(now: Date(), calendar: .current)
         calendarLoading = true
         calendarStatus = "일정 불러오는 중…"
-        let store = self.store
-        calendarQueue.async { [weak self] in
-            guard let self = self else { return }
-            let start = Date(), calendar = Calendar.current
-            let dayStart = calendar.startOfDay(for: start)
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? start
-            let weekStart = calendar.dateInterval(of: .weekOfYear, for: start)?.start ?? dayStart
-            let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? dayEnd
-            let monthInterval = calendar.dateInterval(of: .month, for: start)
-            let monthStart = monthInterval?.start ?? dayStart, monthEnd = monthInterval?.end ?? dayEnd
-            let upcomingEnd = calendar.date(byAdding: .day, value: 7, to: start) ?? start
-            let end = max(upcomingEnd, weekEnd, monthEnd)
-            let predicate = store.predicateForEvents(withStart: min(dayStart, weekStart, monthStart), end: end, calendars: nil)
-            let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ko_KR"); formatter.dateStyle = .short; formatter.timeStyle = .short
-            let fetched = store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
-            let selected = fetched.filter { eventIsUpcoming(start: $0.startDate, end: $0.endDate, now: start, through: upcomingEnd) }.prefix(20)
-            let today = fetched.filter { $0.startDate < dayEnd && ($0.endDate > dayStart || $0.startDate >= dayStart) }
-            let weekDates = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: weekStart) }
-            let weekEventDays = Set(weekDates.filter { date in
-                guard let next = calendar.date(byAdding: .day, value: 1, to: date) else { return false }
-                return fetched.contains { event in
-                    eventIntersectsCalendarDay(start: event.startDate, end: event.endDate, dayStart: date, dayEnd: next)
-                }
-            }.map { calendar.startOfDay(for: $0) })
-            let monthCount = calendar.range(of: .day, in: .month, for: start)?.count ?? 0
-            let monthDates = (0..<monthCount).compactMap { calendar.date(byAdding: .day, value: $0, to: monthStart) }
-            let monthEventDays = Set(monthDates.filter { date in
-                guard let next = calendar.date(byAdding: .day, value: 1, to: date) else { return false }
-                return fetched.contains { event in
-                    eventIntersectsCalendarDay(start: event.startDate, end: event.endDate, dayStart: date, dayEnd: next)
-                }
-            }.map { calendar.startOfDay(for: $0) })
-            let additions = selected.compactMap { event -> (String, Date)? in
-                guard let created = event.creationDate else { return nil }
-                return (event.calendarItemIdentifier, created)
-            }
-            func row(_ event: EKEvent) -> Item {
-                Item(id: event.eventIdentifier ?? UUID().uuidString, title: event.title ?? "제목 없음", subtitle: event.isAllDay ? "종일" : formatter.string(from: event.startDate), start: event.startDate, end: event.endDate, allDay: event.isAllDay, color: NSColor(cgColor: event.calendar.cgColor))
-            }
-            let rows = selected.map(row), todayRows = today.map(row), todayCount = today.count
-            DispatchQueue.main.async {
-                guard generation == self.calendarGeneration, EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return }
-                self.events = rows; self.todayEvents = todayRows; self.todayEventCount = todayCount; self.weekEventDays = weekEventDays; self.monthEventDays = monthEventDays; self.calendarLoading = false
-                self.calendarStatus = rows.isEmpty ? "다가오는 일정 없음" : "앞으로 7일"
-                self.announceRecentAdditions(additions, type: .event)
-            }
-        }
-    }
-
-    func loadReminders() {
-        store.requestFullAccessToReminders { [weak self] granted, error in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                guard granted, error == nil else { self.clearReminders(status: "미리 알림 접근을 허용해 주세요"); return }
-                self.refreshReminders()
-            }
-        }
-    }
-
-    private func refreshReminders() {
-        guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else { return }
-        reminderGeneration += 1; let generation = reminderGeneration
-        let predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
-        store.fetchReminders(matching: predicate) { [weak self] reminders in
-            let snapshot = Self.projectReminders(reminders ?? [])
-            DispatchQueue.main.async {
-                guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else { return }
-                self?.acceptReminderFetch(snapshot.rows, additions: snapshot.additions, generation: generation)
-            }
-        }
-    }
-
-    static func projectReminders(_ reminders: [EKReminder]) -> (rows: [Item], additions: [(String, Date)]) {
-        let incomplete = reminders.filter { !$0.isCompleted }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateStyle = .medium
-        let rows = incomplete.map { reminder in
-            let due = reminder.dueDateComponents
-            let date = reminderDueDate(due)
-            let subtitle = reminderSubtitle(list: reminder.calendar?.title ?? "", due: due, date: date, formatter: formatter)
-            return Item(id: reminder.calendarItemIdentifier, title: reminder.title ?? "제목 없음", subtitle: subtitle, start: date)
-        }.sorted { first, second in
-            switch (first.start, second.start) {
-            case let (a?, b?): return a < b
-            case (_?, nil): return true
-            case (nil, _?): return false
-            case (nil, nil): return first.title.localizedCaseInsensitiveCompare(second.title) == .orderedAscending
-            }
-        }
-        let additions = incomplete.compactMap { item -> (String, Date)? in
-            item.creationDate.map { (item.calendarItemIdentifier, $0) }
-        }
-        return (rows, additions)
-    }
-
-    func acceptReminderFetch(_ rows: [Item], additions: [(String, Date)], generation: Int) {
-        guard generation == reminderGeneration else { return }
-        publishReminders(rows)
-        announceRecentAdditions(additions, type: .reminder)
-    }
-
-    private func publishReminders(_ rows: [Item]) {
-        reminders = rows
-        remindersStatus = rows.isEmpty ? "미완료 항목 없음" : "미완료 항목"
-    }
-
-    private func clearReminders(status: String) {
-        reminderGeneration &+= 1
-        reminders = []
-        remindersStatus = status
-    }
-
-    // EventKit change notifications do not identify an addition. Only report
-    // a visible item with a recent creation date after this observer started;
-    // edits, refreshes and old items entering the date window do not qualify.
-    private func announceRecentAdditions(_ items: [(String, Date)], type: Addition) {
-        let now = Date()
-        announcedAdditions = announcedAdditions.filter { now.timeIntervalSince($0.value) < 300 }
-        for (id, created) in items where !id.isEmpty {
-            let key = "\(type == .event ? "event" : "reminder"):\(id)"
-            let age = now.timeIntervalSince(created)
-            guard created >= observationStarted, age >= -2, age < 120, announcedAdditions[key] == nil else { continue }
-            announcedAdditions[key] = now
-            onAdded?(type)
-        }
-    }
-
-    private func markAddition(_ id: String, type: Addition) {
-        guard !id.isEmpty else { return }
-        announcedAdditions["\(type == .event ? "event" : "reminder"):\(id)"] = Date()
-    }
-
-    func completeReminder(_ id: String) {
-        guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else {
-            clearReminders(status: "미리 알림 권한 필요")
-            return
-        }
-        completeReminder(id, find: { store.calendarItem(withIdentifier: $0) as? EKReminder },
-                         save: { try store.save($0, commit: true) }, refresh: refreshReminders)
-    }
-
-    func completeReminder(_ id: String, find: (String) -> EKReminder?, save: (EKReminder) throws -> Void, refresh: () -> Void) {
-        guard reminders.contains(where: { $0.id == id }) else { return }
-        guard let reminder = find(id) else { remindersStatus = "항목을 다시 불러와 주세요"; return }
-        if !reminder.isCompleted {
-            let previousDate = reminder.completionDate
-            reminder.isCompleted = true
-            reminder.completionDate = Date()
+        tasksStatus = "할 일 불러오는 중…"
+        Task { @MainActor in
             do {
-                try save(reminder)
+                let renewed = try await client.refresh(session)
+                guard generation == self.refreshGeneration else { return }
+                try self.cacheRenewal(renewed, previous: session)
+                async let calendars = self.fetchCalendar(window: window, token: renewed.accessToken)
+                async let tasks = self.fetchTasks(calendar: window.calendar, token: renewed.accessToken)
+                let (calendarResult, taskResult) = await (calendars, tasks)
+                guard generation == self.refreshGeneration else { return }
+                self.calendarLoading = false
+                switch calendarResult {
+                case .success(let events): self.publishEvents(events, window: window)
+                case .failure(let error):
+                    if self.handleExpiredSession(error) { return }
+                    self.calendarStatus = error.localizedDescription
+                }
+                switch taskResult {
+                case .success(let rows): self.publishTasks(rows)
+                case .failure(let error):
+                    if !self.handleExpiredSession(error) { self.tasksStatus = error.localizedDescription }
+                }
             } catch {
-                reminder.isCompleted = false
-                reminder.completionDate = previousDate
-                reminderGeneration &+= 1
-                remindersStatus = "미리 알림을 완료하지 못했습니다"
-                return
+                guard generation == self.refreshGeneration else { return }
+                self.calendarLoading = false
+                if !self.handleExpiredSession(error) {
+                    self.calendarStatus = error.localizedDescription
+                    self.tasksStatus = error.localizedDescription
+                }
             }
         }
-        // Refetches started before this commit cannot reinsert the completed row.
-        reminderGeneration &+= 1
-        publishReminders(reminders.filter { $0.id != id })
-        refresh()
     }
 
-    func addReminder() {
-        guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess,
-              let list = store.defaultCalendarForNewReminders() else { remindersStatus = "미리 알림 접근과 목록을 확인해 주세요"; return }
-        let alert = NSAlert(); alert.messageText = "미리 알림 추가"
-        let form = ReminderForm(); alert.accessoryView = form.view; alert.window.initialFirstResponder = form.title
-        alert.addButton(withTitle: "추가"); alert.addButton(withTitle: "취소"); NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let title = form.title.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); guard !title.isEmpty else { return }
-        let item = EKReminder(eventStore: store); item.title = title; item.calendar = list
-        if form.dateEnabled.state == .on {
-            let includeTime = form.timeEnabled.state == .on
-            let due = reminderDueComponents(form.date.dateValue, includeTime: includeTime)
-            item.dueDateComponents = due
-            if includeTime, let date = due.date { item.addAlarm(EKAlarm(absoluteDate: date)) }
+    private func cacheRenewal(_ renewed: GoogleAgendaToken, previous: GoogleAgendaToken) throws {
+        if renewed != previous {
+            try GoogleAgendaKeychain.save(renewed, account: "session")
+            session = renewed
         }
-        let location = form.location.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !location.isEmpty { item.location = location }
+    }
+
+    private func fetchCalendar(window: GoogleAgendaWindow, token: String) async -> Result<[Item], Error> {
         do {
-            try store.save(item, commit: true)
-            markAddition(item.calendarItemIdentifier, type: .reminder)
-            onAdded?(.reminder)
-            refreshReminders()
-        } catch { remindersStatus = "미리 알림을 추가하지 못했습니다" }
+            let host = "www.googleapis.com"
+            let calendars = try await GoogleAgendaClient.pages(GoogleCalendarEntry.self, host: host,
+                path: ["calendar", "v3", "users", "me", "calendarList"], token: token,
+                query: [.init(name: "minAccessRole", value: "reader")])
+            let selected = calendars.filter { $0.primary == true || $0.selected == true }
+            var rows: [Item] = []
+            for calendar in selected {
+                let events = try await GoogleAgendaClient.pages(GoogleCalendarEvent.self, host: host,
+                    path: ["calendar", "v3", "calendars", calendar.id, "events"], token: token, query: window.query)
+                rows += events.compactMap { $0.row(calendar: calendar, local: window.calendar) }
+            }
+            return .success(rows)
+        } catch { return .failure(error) }
+    }
+
+    private func fetchTasks(calendar: Calendar, token: String) async -> Result<[Item], Error> {
+        do {
+            let host = "tasks.googleapis.com"
+            let lists = try await GoogleAgendaClient.pages(GoogleTaskList.self, host: host,
+                path: ["tasks", "v1", "users", "@me", "lists"], token: token)
+            var rows: [Item] = []
+            for list in lists {
+                let tasks = try await GoogleAgendaClient.pages(GoogleTask.self, host: host,
+                    path: ["tasks", "v1", "lists", list.id, "tasks"], token: token,
+                    query: [.init(name: "showCompleted", value: "false")])
+                rows += tasks.compactMap { $0.row(in: list, calendar: calendar) }
+            }
+            return .success(rows)
+        } catch { return .failure(error) }
+    }
+
+    func publishEvents(_ rows: [Item], window: GoogleAgendaWindow) {
+        let ordered = rows.sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
+        events = Array(ordered.filter { row in
+            guard let start = row.start, let end = row.end else { return false }
+            return eventIsUpcoming(start: start, end: end, now: window.now, through: window.upcomingEnd)
+        }.prefix(20))
+        todayEvents = ordered.filter { row in
+            guard let start = row.start, let end = row.end else { return false }
+            return eventIntersectsCalendarDay(start: start, end: end, dayStart: window.day.start, dayEnd: window.day.end)
+        }
+        todayEventCount = todayEvents.count
+        weekEventDays = window.datesWithEvents(ordered, interval: window.week)
+        monthEventDays = window.datesWithEvents(ordered, interval: window.month)
+        calendarStatus = events.isEmpty ? "다가오는 일정 없음" : "앞으로 7일"
+    }
+
+    private func publishTasks(_ rows: [Item]) {
+        tasks = rows.sorted { left, right in
+            if left.start != right.start { return (left.start ?? .distantFuture) < (right.start ?? .distantFuture) }
+            return left.title.localizedStandardCompare(right.title) == .orderedAscending
+        }
+        tasksStatus = tasks.isEmpty ? "미완료 항목 없음" : "미완료 항목"
+    }
+
+    private func mutate(_ type: Addition, perform: @escaping (String) async throws -> Void, success: @escaping () -> Void) {
+        guard let client, let session, !calendarLoading, !mutationInProgress else { return }
+        mutationInProgress = true
+        Task { @MainActor in
+            do {
+                let renewed = try await client.refresh(session)
+                try self.cacheRenewal(renewed, previous: session)
+                try await perform(renewed.accessToken)
+                success()
+                self.mutationInProgress = false
+                self.refreshAuthorized()
+            } catch {
+                self.mutationInProgress = false
+                if !self.handleExpiredSession(error) {
+                    if type == .event { self.calendarStatus = error.localizedDescription }
+                    else { self.tasksStatus = error.localizedDescription }
+                }
+            }
+        }
+    }
+
+    func completeTask(_ item: Item) {
+        guard let location = item.taskLocation, tasks.contains(where: { $0.id == item.id }) else { return }
+        mutate(.task) { token in
+            _ = try await GoogleAgendaClient.request(GoogleTask.self, host: "tasks.googleapis.com",
+                path: ["tasks", "v1", "lists", location.list, "tasks", location.task], token: token,
+                method: "PATCH", body: ["status": "completed"])
+        } success: { [weak self] in
+            guard let self else { return }
+            self.publishTasks(self.tasks.filter { $0.id != item.id })
+        }
+    }
+
+    func addTask() {
+        guard googleConnected, !calendarLoading, !mutationInProgress,
+              let input = agendaEntry(title: "Google Tasks에 추가", timed: false) else { return }
+        var body: [String: Any] = ["title": input.title]
+        if let date = input.date {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.dateFormat = "yyyy-MM-dd"
+            body["due"] = formatter.string(from: date) + "T00:00:00.000Z"
+        }
+        mutate(.task) { token in
+            _ = try await GoogleAgendaClient.request(GoogleTask.self, host: "tasks.googleapis.com",
+                path: ["tasks", "v1", "lists", "@default", "tasks"], token: token,
+                method: "POST", body: body)
+        } success: { [weak self] in self?.onAdded?(.task) }
     }
 
     func addEvent() {
-        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess,
-              let calendar = store.defaultCalendarForNewEvents else { calendarStatus = "캘린더 접근과 기본 캘린더를 확인해 주세요"; return }
-        let alert = NSAlert(); alert.messageText = "일정 추가"
-        let field = NSTextField(frame: NSRect(x: 0, y: 32, width: 260, height: 24)); field.placeholderString = "일정 제목"
-        let date = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 260, height: 24)); date.datePickerStyle = .textFieldAndStepper; date.datePickerElements = [.yearMonthDay, .hourMinute]; date.dateValue = Date().addingTimeInterval(3600)
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 56)); view.addSubview(field); view.addSubview(date); alert.accessoryView = view
-        alert.addButton(withTitle: "추가"); alert.addButton(withTitle: "취소"); NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); guard !title.isEmpty else { return }
-        let event = EKEvent(eventStore: store); event.title = title; event.calendar = calendar; event.startDate = date.dateValue; event.endDate = date.dateValue.addingTimeInterval(3600)
-        do {
-            try store.save(event, span: .thisEvent, commit: true)
-            markAddition(event.calendarItemIdentifier, type: .event)
-            onAdded?(.event)
-            refreshCalendar()
-        } catch { calendarStatus = "일정을 추가하지 못했습니다" }
+        guard googleConnected, !calendarLoading, !mutationInProgress,
+              let input = agendaEntry(title: "Google Calendar에 추가", timed: true), let start = input.date
+        else { return }
+        let formatter = ISO8601DateFormatter()
+        let body: [String: Any] = [
+            "summary": input.title, "start": ["dateTime": formatter.string(from: start)],
+            "end": ["dateTime": formatter.string(from: start.addingTimeInterval(3600))]
+        ]
+        mutate(.event) { token in
+            _ = try await GoogleAgendaClient.request(GoogleCalendarEvent.self, host: "www.googleapis.com",
+                path: ["calendar", "v3", "calendars", "primary", "events"], token: token, method: "POST", body: body)
+        } success: { [weak self] in self?.onAdded?(.event) }
+    }
+
+    private func agendaEntry(title: String, timed: Bool) -> (title: String, date: Date?)? {
+        let alert = NSAlert(); alert.messageText = title
+        let field = NSTextField(frame: NSRect(x: 0, y: 62, width: 270, height: 24))
+        field.placeholderString = timed ? "일정 제목" : "할 일 제목"
+        let date = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 270, height: 24))
+        date.datePickerStyle = .textFieldAndStepper
+        date.datePickerElements = timed ? [.yearMonthDay, .hourMinute] : [.yearMonthDay]
+        date.dateValue = Date().addingTimeInterval(timed ? 3600 : 0)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 86))
+        view.addSubview(field); view.addSubview(date)
+        let optionalDate = NSButton(checkboxWithTitle: "마감일 지정", target: nil, action: nil)
+        if !timed {
+            optionalDate.frame = NSRect(x: 0, y: 30, width: 160, height: 24)
+            view.addSubview(optionalDate)
+            date.bind(.enabled, to: optionalDate, withKeyPath: "state")
+        }
+        alert.accessoryView = view
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "추가"); alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : (value, timed || optionalDate.state == .on ? date.dateValue : nil)
+    }
+}
+
+struct AgendaEventDay {
+    let date: Date?
+    let items: [AgendaModel.Item]
+}
+
+func agendaEventDays(_ items: [AgendaModel.Item], today: Date, calendar: Calendar) -> [AgendaEventDay] {
+    Dictionary(grouping: items) { item in
+        item.start.map { max(today, calendar.startOfDay(for: $0)) }
+    }
+    .map { AgendaEventDay(date: $0.key, items: $0.value) }
+    .sorted { ($0.date ?? .distantFuture) < ($1.date ?? .distantFuture) }
+}
+
+extension AgendaModel {
+    func prepareAgendaRender(connected: Bool, empty: Bool, now: Date) {
+        guard connected else { return }
+        googleConnected = true
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
+        if empty {
+            calendarStatus = "다가오는 일정 없음"; tasksStatus = "미완료 항목 없음"
+            return
+        }
+        events = [
+            Item(id: "brief", title: "제작 회의", subtitle: "", start: today.addingTimeInterval(10.5 * 3600),
+                 color: NSColor(srgbRed: 0.42, green: 0.68, blue: 1, alpha: 1)),
+            Item(id: "shoot", title: "브랜드 인터뷰 촬영", subtitle: "", start: today.addingTimeInterval(14 * 3600),
+                 color: NSColor(srgbRed: 0.55, green: 0.86, blue: 0.73, alpha: 1)),
+            Item(id: "rehearsal", title: "콘텐츠 공개", subtitle: "", start: tomorrow, allDay: true,
+                 color: NSColor(srgbRed: 0.78, green: 0.61, blue: 1, alpha: 1)),
+            Item(id: "review", title: "편집본 리뷰 및 최종 전달 일정 확인", subtitle: "",
+                 start: tomorrow.addingTimeInterval(11 * 3600))
+        ]
+        tasks = [
+            Item(id: "materials", title: "촬영 자료 확인", subtitle: "", start: yesterday, taskListTitle: "제작"),
+            Item(id: "edit", title: "클라이언트 검토용 편집본 내보내기", subtitle: "", start: today, taskListTitle: "후반 작업"),
+            Item(id: "meeting", title: "다음 회의 안건 정리", subtitle: "", taskListTitle: "스튜디오"),
+            Item(id: "budget", title: "제작비 정산", subtitle: "", taskListTitle: "운영"),
+            Item(id: "schedule", title: "다음 주 촬영 일정 공유", subtitle: "", taskListTitle: "제작")
+        ]
+        calendarStatus = "앞으로 7일"; tasksStatus = "미완료 항목"
     }
 }
 

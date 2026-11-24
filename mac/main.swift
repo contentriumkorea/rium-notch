@@ -3,7 +3,6 @@ import SwiftUI
 import Combine
 import CoreLocation
 import CoreAudio
-import EventKit
 import UniformTypeIdentifiers
 import ServiceManagement
 import CoreImage
@@ -599,7 +598,7 @@ struct AgentActivity: Identifiable {
     var providerName: String { source == "claude" ? "Claude" : "Codex" }
     var sessionKey: AgentSessionKey { AgentSessionKey(self) }
 }
-struct AgentSessionKey: Hashable {
+struct AgentSessionKey: Hashable, Codable {
     let source: String
     let id: String
     init(source: String, id: String) { self.source = source; self.id = id }
@@ -1071,9 +1070,13 @@ func droppedFileURL(_ item: NSSecureCoding?) -> URL? {
 func reportDropDiagnostic(_ message: String) {
     if CommandLine.arguments.contains("--report-windows") { print("RIUM_DROP \(message)"); fflush(stdout) }
 }
+private let expandedNotchMaximumShoulder: CGFloat = 36
+private let expandedNotchContentInset: CGFloat = 19
+
 func notchWidth(expanded: Bool, displayWidth: CGFloat? = nil) -> CGFloat {
-    // Reserve space for the shoulders outside the content on narrow displays.
-    let available = max(0, (displayWidth ?? NSScreen.main?.frame.width ?? 850) - (expanded ? 72 : 24))
+    // Keep the same screen-edge clearance and content width on narrow displays.
+    let outlineReserve = expanded ? 2 * expandedNotchMaximumShoulder : 24
+    let available = max(0, (displayWidth ?? NSScreen.main?.frame.width ?? 850) - outlineReserve)
     return min(expanded ? 870 : 405, available)
 }
 func helperFailureAfterLaunch(_ args: [String], message: String) -> [String: Any] {
@@ -1097,8 +1100,8 @@ final class HelperEventGate {
         return true
     }
 }
-func notchOutlineSize(content: CGSize, expanded: Bool, screenWidth: CGFloat) -> CGSize {
-    CGSize(width: min(screenWidth, content.width + (expanded ? 72 : 0)), height: content.height)
+func notchOutlineSize(content: CGSize, screenWidth: CGFloat, shoulderOutset: CGFloat) -> CGSize {
+    CGSize(width: min(screenWidth, content.width + 2 * shoulderOutset), height: content.height)
 }
 let notchPanelSpacing: CGFloat = 12
 private let timerAlarmBannerHeight: CGFloat = 76
@@ -1210,9 +1213,13 @@ func collapsedHeaderPadding(width: CGFloat, cameraWidth: CGFloat) -> CGFloat {
     let camera = cameraWidth.isFinite ? max(0, cameraWidth) : 0
     return min(collapsedHeaderSideInset, max(0, (width - min(width, camera + 8)) / 2))
 }
+func compactMonitorTrailingOffset(width: CGFloat, cameraWidth: CGFloat, floating: Bool) -> CGFloat {
+    guard !floating, cameraWidth.isFinite, cameraWidth > 0 else { return 0 }
+    return min(8, max(0, collapsedHeaderPadding(width: width, cameraWidth: cameraWidth) - 14))
+}
 func notchContentHorizontalPadding(floating: Bool, visualExpanded: Bool, assistantPeek: Bool,
                                    width: CGFloat, cameraWidth: CGFloat) -> CGFloat {
-    if visualExpanded { return 26 }
+    if visualExpanded { return expandedNotchContentInset }
     if floating { return 8 }
     if assistantPeek { return 4 }
     return cameraWidth <= 0 ? 26 : collapsedHeaderPadding(width: width, cameraWidth: cameraWidth)
@@ -1570,7 +1577,14 @@ final class Model: ObservableObject {
         agentSessionIsPersonal(session, thread: assistant.observationThreadID,
                                active: assistantIndicator != .off || assistantFinishing || assistantListening || assistantSpeaking)
     }
-    var externalAgentItems: [AgentActivity] { agentItems.filter { !isPersonalAssistantSession($0.sessionKey) } }
+    @Published private(set) var hiddenAgentSessionKeys: [AgentSessionKey] = []
+    private func showsExternalAgentSession(_ session: AgentSessionKey) -> Bool {
+        !hiddenAgentSessionKeys.contains(session) && !isPersonalAssistantSession(session)
+    }
+    var externalAgentItems: [AgentActivity] { agentItems.filter { showsExternalAgentSession($0.sessionKey) } }
+    var visibleActiveAgentCount: Int32 {
+        activeAgentSessionCount(externalAgentItems, assistant: assistantIndicator)
+    }
     var homeExternalAgent: AgentActivity? {
         collapsedAgent(externalAgentItems.filter { homeBandAgentRank($0) != nil })
     }
@@ -1801,6 +1815,7 @@ final class Model: ObservableObject {
                       (compactStatusVisible && (visiblePermissionPeek != nil || visibleSystemNotificationPeek != nil || visibleFocusAlarmPeek != nil)))
     }
     @Published var lightCue: NotchLightCue?
+    @Published var notchLightingVisible = true
     @Published var menuBarIsLight = false
     @Published private(set) var permissionPeek: AgentActivity?
     private var permissionPeekGeneration = 0
@@ -1994,7 +2009,7 @@ final class Model: ObservableObject {
               assistantIndicator != .approval, assistantIndicator != .question,
               !externalAgentItems.contains(where: { agentNeedsAttention($0.state) }) else { return nil }
         // shortcut: preserving a covered transient until attention clears is an inferred priority policy.
-        if let peek = agentTransientPeek, isPersonalAssistantSession(peek.agent.sessionKey) { return nil }
+        if let peek = agentTransientPeek, !showsExternalAgentSession(peek.agent.sessionKey) { return nil }
         return agentTransientPeek
     }
     var visibleAssistantPeek: Bool {
@@ -2140,7 +2155,9 @@ final class Model: ObservableObject {
             return CGSize(width: min(displayWidth, NotchCorners.physicalOutlineWidth(cameraWidth: cameraExclusion)),
                           height: cameraHeight)
         }
-        var outline = notchOutlineSize(content: currentNotchSize, expanded: expanded, screenWidth: displayWidth)
+        let shoulderOutset = floatingIslandPlacement == nil ? NotchCorners.expanded.shoulder : expandedNotchMaximumShoulder
+        var outline = notchOutlineSize(content: currentNotchSize, screenWidth: displayWidth,
+                                       shoulderOutset: expanded ? shoulderOutset : 0)
         if !expanded, floatingIslandPlacement == nil, cameraExclusion > 0, cameraHeight > 0, outline.height == cameraHeight {
             // Extend the lower edge without shifting the menu-bar alignment or content.
             outline.height += 0.5
@@ -2155,9 +2172,12 @@ final class Model: ObservableObject {
         let status = showsCompactMonitor || showsCollapsedAgent || dictationDisplayActive || receivingFile || receivedFilePeek != nil || shortcutPeek != nil || caseKeyPeek != nil || batteryPeek != nil || weatherPeek != nil || timerState != 0 || !volumeOverlay.isEmpty
         return notchShellState(expanded: expanded, detail: hasVisibleDetailPeek, status: status, media: mediaLightPlaying, shelf: shelfRevealVisible)
     }
+    private var hasPhysicalNotch: Bool {
+        floatingIslandPlacement == nil && cameraExclusion > 0 && cameraHeight > 0
+    }
     var currentNotchCorners: NotchCorners {
-        if floatingIslandPlacement == nil && cameraExclusion > 0 && cameraHeight > 0 &&
-            ((!expanded && !shelfRevealVisible) || (expanded && !compactStatusVisible)) { return .physical }
+        if expanded { return .expanded }
+        if hasPhysicalNotch && !shelfRevealVisible { return .physical }
         return notchCorners(for: currentNotchShellState)
     }
     @Published var mediaTitle = "재생 정보를 불러오세요"
@@ -2426,6 +2446,7 @@ final class Model: ObservableObject {
         restorePomodoroSettings()
         restoreHomeLayout()
         if let preferences = self.layoutPreferences {
+            hiddenAgentSessionKeys = hiddenAgentSessions(preferences.data(forKey: "rium.agent.hiddenSessions") ?? Data())
             preferredDisplayKey = NotchDisplayPreference(defaults: preferences).load()
             hoverEnabled = preferences.object(forKey: "rium.notch.hover") as? Bool ?? true
             compactStatusVisible = preferences.object(forKey: "rium.notch.compactStatusVisible") as? Bool ?? true
@@ -2436,7 +2457,7 @@ final class Model: ObservableObject {
         agenda.onAdded = { [weak self] addition in
             switch addition {
             case .event: self?.showAgendaLight(.calendarAdded)
-            case .reminder: self?.showAgendaLight(.reminderAdded)
+            case .task: self?.showAgendaLight(.reminderAdded)
             }
         }
         shortcutPeeksEnabled = shortcutPeeksPreference(UserDefaults.standard.object(forKey: "rium.shortcuts.peeks") as? Bool)
@@ -2479,7 +2500,7 @@ final class Model: ObservableObject {
                 if hidden != self.systemNotificationPrivacyHidden { self.systemNotificationPrivacyHidden = hidden }
             }
             if self.deferredServicesStarted && self.mediaTick % 5 == 0 && (self.section == .music || self.section == .home || self.mediaTick % 10 == 0) { self.refreshMedia() }
-            if self.deferredServicesStarted && self.mediaTick % 10 == 0 { self.agentWatcher?.reconcileRoots(); self.refreshAgents(); self.agenda.refreshIfAuthorizationChanged(); self.dictation.restoreIfAuthorized() }
+            if self.deferredServicesStarted && self.mediaTick % 10 == 0 { self.agentWatcher?.reconcileRoots(); self.refreshAgents(); self.dictation.restoreIfAuthorized() }
             self.expireAgentSnapshotIfNeeded()
             self.musicSpectrum.expireStaleLevels()
             self.refreshWallClock()
@@ -2886,6 +2907,21 @@ final class Model: ObservableObject {
             if self.lightCue?.id == cue.id { self.lightCue = self.activeLightCues.last }
         }
     }
+    func updateHiddenAgentSessions(hiding session: AgentSessionKey?) {
+        var sessions: [AgentSessionKey] = []
+        if let session {
+            sessions = hiddenAgentSessionKeys.filter { $0 != session }
+            sessions.append(session)
+            sessions = Array(sessions.suffix(256))
+        }
+        hiddenAgentSessionKeys = sessions
+        layoutPreferences?.set(try? JSONEncoder().encode(sessions), forKey: "rium.agent.hiddenSessions")
+        guard let session else { return }
+        pendingPermissionPeeks.removeAll { $0 == session }
+        if permissionPeek?.sessionKey == session { clearPermissionPeek(discardPending: false) }
+        if agentTransientPeek?.agent.sessionKey == session { clearAgentTransientPeek() }
+        if deferredRunningPeek == session { deferredRunningPeek = nil }
+    }
     fileprivate func clearPermissionPeek(discardPending: Bool = true) {
         let previousState = currentNotchShellState
         if let peek = permissionPeek { voiceApproval.cancel(owner: permissionPeekVoiceOwner(peek)) }
@@ -2895,7 +2931,7 @@ final class Model: ObservableObject {
         else {
             while !expanded && !pendingPermissionPeeks.isEmpty {
                 let session = pendingPermissionPeeks.removeFirst()
-                guard !isPersonalAssistantSession(session),
+                guard showsExternalAgentSession(session),
                       let item = agentItems.first(where: { $0.sessionKey == session && $0.state.hasPrefix("승인 대기") }) else { continue }
                 showPermissionPeek(item)
                 break
@@ -2904,7 +2940,7 @@ final class Model: ObservableObject {
         if permissionPeek == nil { recordDetailFold(from: previousState) }
     }
     fileprivate func showPermissionPeek(_ item: AgentActivity) {
-        guard !expanded, !isPersonalAssistantSession(item.sessionKey), item.state.hasPrefix("승인 대기") else { return }
+        guard !expanded, showsExternalAgentSession(item.sessionKey), item.state.hasPrefix("승인 대기") else { return }
         if let previous = permissionPeek {
             if !sameAgentSession(previous, item) && !pendingPermissionPeeks.contains(item.sessionKey) {
                 pendingPermissionPeeks.append(item.sessionKey)
@@ -2958,7 +2994,7 @@ final class Model: ObservableObject {
     }
 
     fileprivate func showAgentTransientPeek(_ item: AgentActivity, kind: AgentTransientKind) {
-        guard permissionPeek == nil, !isPersonalAssistantSession(item.sessionKey) else { return }
+        guard permissionPeek == nil, showsExternalAgentSession(item.sessionKey) else { return }
         if expanded {
             if kind == .running && notchScreenAvailable { deferredRunningPeek = item.sessionKey }
             return
@@ -3001,13 +3037,14 @@ final class Model: ObservableObject {
         let now = ProcessInfo.processInfo.systemUptime
         let everyEvent = preferences.string(forKey: "rium.light.agentWaveMode") == "every"
         let style = preferences.string(forKey: "rium.light.style") ?? "classic"
+        let waveStyle = preferences.string(forKey: "rium.light.waveStyle") ?? "notch"
         agentScreenWaveHistory.removeAll { now < $0.at || now - $0.at > 60 }
         // The reference counts running and needs_you; our observed state labels
         // approximate those two categories across the available adapters.
-        let active = activeAgentSessionCount(agentItems, assistant: assistantIndicator, assistantThread: assistant.observationThreadID)
+        let active = visibleActiveAgentCount
         var waves: [NotchScreenWave] = []
         for event in events {
-            guard event.supportsAgentScreenWave(style: style), let kind = agentScreenWaveCategory(event) else { continue }
+            guard event.supportsAgentScreenWave(style: style, waveStyle: waveStyle), let kind = agentScreenWaveCategory(event) else { continue }
             let times = agentScreenWaveHistory.map(\.at), kinds = agentScreenWaveHistory.map(\.kind)
             let admitted = times.withUnsafeBufferPointer { timeBuffer in
                 kinds.withUnsafeBufferPointer { kindBuffer in
@@ -4944,13 +4981,13 @@ final class Model: ObservableObject {
                 let newQuestions = self.recentAgentQuestions.observe(updated, at: observationTime)
                 let initialized = self.agentObservationReady || recovering
                 let transitions = agentLightTransitions(previous: previous, current: updated, initialized: initialized, newQuestionSessions: newQuestions)
-                    .filter { !self.isPersonalAssistantSession($0.session) && (!recovering || agentRecoveryAllows($0, previous: previous)) }
+                    .filter { self.showsExternalAgentSession($0.session) && (!recovering || agentRecoveryAllows($0, previous: previous)) }
                 let arrivals = agentArrivalKinds(transitions)
                 let previousSessions = Set(previous.map(\.sessionKey))
                 let notifications = agentNotificationTransitions(previous: previous, current: updated, initialized: initialized, newQuestionSessions: newQuestions)
                     .filter { !self.isPersonalAssistantSession($0.0.sessionKey) && (!recovering || $0.1 == .attention || previousSessions.contains($0.0.sessionKey)) }
                 let stalled = updated.first { item in
-                    !self.isPersonalAssistantSession(item.sessionKey) && agentEnteredStall(item, previous: previous, initialized: initialized)
+                    self.showsExternalAgentSession(item.sessionKey) && agentEnteredStall(item, previous: previous, initialized: initialized)
                 }
                 let moodNow = ProcessInfo.processInfo.systemUptime
                 for item in updated {
@@ -4969,8 +5006,8 @@ final class Model: ObservableObject {
                     for transition in approvals {
                         if let item = updated.first(where: { AgentSessionKey($0) == transition.session }) { self.showPermissionPeek(item) }
                     }
-                } else if (!initialized || recovering), updated.contains(where: { $0.state.hasPrefix("승인 대기") && !self.isPersonalAssistantSession($0.sessionKey) }) {
-                    for item in updated where item.state.hasPrefix("승인 대기") && !self.isPersonalAssistantSession(item.sessionKey) { self.showPermissionPeek(item) }
+                } else if (!initialized || recovering), updated.contains(where: { $0.state.hasPrefix("승인 대기") && self.showsExternalAgentSession($0.sessionKey) }) {
+                    for item in updated where item.state.hasPrefix("승인 대기") && self.showsExternalAgentSession(item.sessionKey) { self.showPermissionPeek(item) }
                 } else if transitions.contains(where: { $0.kind == .agentQuestion }) {
                     self.clearAgentTransientPeek()
                 } else if let transition = transitions.first(where: { $0.kind == .agentFailed })
@@ -6501,6 +6538,7 @@ private struct NotchToolbarControlsAnchor: PreferenceKey {
 
 struct NotchView: View {
     private static let tetheringButtonWidth: CGFloat = 126
+    private static let monitorButtonWidth: CGFloat = 40
     private static let compactStatusButtonWidth: CGFloat = 40
     private static let moreButtonWidth: CGFloat = 48
 
@@ -6529,6 +6567,36 @@ struct NotchView: View {
         if model.dictationDisplayActive && !model.assistantListening { return min(4, padding) }
         if model.showsCompactControlOverlay { return min(SystemLevelBadge.sideInset, padding) }
         return musicHeaderVisible ? min(8, padding) : padding
+    }
+    private var horizontalPadding: CGFloat {
+        if !visualExpanded {
+            if model.shelfRevealVisible { return 16 }
+            if floatingSize == nil {
+                if model.visibleSystemNotificationPeek != nil { return 22 }
+                if model.cameraExclusion > 0 && !model.visibleAssistantPeek { return headerHorizontalPadding }
+            }
+        }
+        return notchContentHorizontalPadding(floating: floatingSize != nil, visualExpanded: visualExpanded,
+                                             assistantPeek: model.visibleAssistantPeek, width: visualSize.width,
+                                             cameraWidth: model.cameraExclusion)
+    }
+    private var headerDisplaysCompactMonitor: Bool {
+        guard model.usageTrackingEnabled,
+              !(model.visibleClipboardPeek != nil && model.clipboardBadgeFitsHeader),
+              !(model.dictationDisplayActive && !model.assistantListening),
+              model.shortcutPeek == nil, model.caseKeyPeek == nil, model.batteryPeek == nil,
+              !model.receivingFile, model.receivedFilePeek == nil, model.visibleTimerAlarmTitle == nil,
+              !model.visibleSystemOverlay else { return false }
+        if model.showsCollapsedAgent, let agent = model.collapsedExternalAgent {
+            return agentIsRunning(agent.state) || agentNeedsAttention(agent.state)
+        }
+        if model.assistantIndicator != .off || model.assistantFinishing || model.assistantListening || model.assistantSpeaking {
+            return !model.assistantJustCompleted && model.assistantIndicator != .off
+        }
+        return model.showsCompactMonitor
+    }
+    private var compactMonitorOffset: CGFloat {
+        compactMonitorTrailingOffset(width: visualSize.width, cameraWidth: model.cameraExclusion, floating: floatingSize != nil)
     }
 
     @ViewBuilder private func collapsedAgentHeader() -> some View {
@@ -6630,15 +6698,15 @@ struct NotchView: View {
         } else if model.visibleSystemOverlay {
             SystemLevelBadge(symbol: model.overlaySymbol, level: model.controlOverlayLevel, label: model.volumeOverlay)
         } else if model.showsCollapsedAgent, let agent = model.collapsedExternalAgent {
-            if agent.state != "완료" && model.usageTrackingEnabled && agentIsRunning(agent.state) {
+            if headerDisplaysCompactMonitor {
                 Button(action: { model.select(.agents); model.expanded = true }) {
                     CompactMonitorBadge(model: model)
                 }.buttonStyle(.plain)
-                    .accessibilityLabel(model.usageTrackingEnabled && agentIsRunning(agent.state) ? "\(agent.providerName) \(agent.state), \(model.monitorSummary)" : "\(agent.providerName) \(agent.state)")
-                    .help(model.usageTrackingEnabled && agentIsRunning(agent.state) ? model.monitorSummary : "에이전트 활동 열기")
+                    .accessibilityLabel("\(agent.providerName) \(agent.state), \(model.monitorSummary)")
+                    .help(model.monitorSummary)
             }
         } else if model.assistantIndicator != .off || model.assistantFinishing || model.assistantListening || model.assistantSpeaking {
-            if !model.assistantJustCompleted && model.usageTrackingEnabled && model.assistantIndicator == .working {
+            if headerDisplaysCompactMonitor {
                 Button(action: { model.select(.assistant); model.expanded = true }) {
                     CompactMonitorBadge(model: model)
                 }.buttonStyle(.plain).accessibilityLabel("AI 대화 \(assistantStateLabel)").help("AI 대화 열기")
@@ -6682,6 +6750,7 @@ struct NotchView: View {
                 EmptyView()
             } else if !visualExpanded && model.showsCompactMonitor {
                 headerControls(compact: true).frame(maxWidth: .infinity, alignment: .trailing)
+                    .offset(x: headerDisplaysCompactMonitor ? compactMonitorOffset : 0)
             } else if !visualExpanded && model.cameraExclusion > 0 && floatingSize == nil {
                 let metrics = collapsedHeaderMetrics(width: model.currentNotchSize.width, cameraWidth: model.cameraExclusion, padding: headerHorizontalPadding)
                 let gap = metrics.gap, side = metrics.side
@@ -6692,8 +6761,10 @@ struct NotchView: View {
                         collapsedAgentHeader()
                             .frame(width: side, alignment: musicHeaderVisible ? .trailing : (model.dictationDisplayActive && !model.assistantListening ? .center : .leading))
                     }.clipped()
+                        .offset(x: headerDisplaysCompactMonitor ? -compactMonitorOffset : 0)
                     Color.clear.frame(width: gap).allowsHitTesting(false).accessibilityHidden(true)
                     HStack(spacing: 4) { headerControls(compact: !model.expanded) }.frame(width: side, alignment: musicHeaderVisible ? .leading : .trailing).clipped()
+                        .offset(x: headerDisplaysCompactMonitor ? compactMonitorOffset : 0)
                 }
             } else if !visualExpanded {
                 HStack {
@@ -6759,7 +6830,7 @@ struct NotchView: View {
             } else if visualExpanded {
                 if model.tabEditing {
                     HStack(spacing: 7) {
-                        if visualSize.width - 52 < 500 {
+                        if visualSize.width - 2 * horizontalPadding < 500 {
                             // shortcut: the narrow editor layout needs reference comparison.
                             ScrollView(.horizontal, showsIndicators: false) {
                                 tabEditingControls.fixedSize(horizontal: true, vertical: false)
@@ -6796,7 +6867,7 @@ struct NotchView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Color.clear.frame(width: Self.tetheringButtonWidth + Self.compactStatusButtonWidth + Self.moreButtonWidth, height: 1)
+                    Color.clear.frame(width: Self.tetheringButtonWidth + Self.monitorButtonWidth + Self.compactStatusButtonWidth + Self.moreButtonWidth, height: 1)
                         .anchorPreference(key: NotchToolbarControlsAnchor.self, value: .bounds) { $0 }
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
@@ -6816,7 +6887,7 @@ struct NotchView: View {
                                     ScrollView(.vertical, showsIndicators: false) { homeEditorContent }
                                 } else { homeEditorContent }
                             } else {
-                                HomeView(model: model, agenda: model.agenda, contentWidth: visualSize.width, flightNamespace: characterMotion)
+                                HomeView(model: model, agenda: model.agenda, contentWidth: visualSize.width - 2 * horizontalPadding, flightNamespace: characterMotion)
                                     .frame(height: model.homeShowsCodexUsage ? homeCardRowHeight(editing: false) : nil, alignment: .top)
                                     .transition(.identity)
                                 if model.homeShowsCodexUsage { HomeCodexUsagePanel(model: model) }
@@ -6838,7 +6909,8 @@ struct NotchView: View {
                 } else if model.section == .weather {
                     WeatherView(model: model)
                 } else if model.section == .agenda {
-                    AgendaView(model: model.agenda)
+                    AgendaView(model: model.agenda, contentWidth: visualSize.width - 2 * horizontalPadding)
+                        .layoutPriority(1)
                 } else if model.section == .notes {
                     NotesPage(model: model, notes: model.notes)
                 } else if model.section == .assistant {
@@ -6892,8 +6964,14 @@ struct NotchView: View {
                         if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary) }
                     }.frame(maxWidth: .infinity, alignment: .leading).riumTile()
                 }.font(.system(size: 12))
-                Divider().overlay(.white.opacity(0.12))
+                } else {
+                    HStack {
+                        Text("시스템 모니터링이 꺼져 있습니다.").font(.system(size: 12))
+                        Spacer()
+                        Button("모니터링 켜기") { model.setUsageTrackingEnabled(true) }
+                    }.riumTile()
                 }
+                Divider().overlay(.white.opacity(0.12))
                 HStack {
                     Text(model.timerPomodoro ? "포모도로 · \(model.timerPhase.title)" : "집중 타이머").font(.system(size: 13, weight: .semibold))
                     Text(String(format: "%02llu:%02llu", model.timerRemaining / 60, model.timerRemaining % 60)).monospacedDigit()
@@ -6939,9 +7017,7 @@ struct NotchView: View {
         .animation(floatingSize != nil && !reduceMotion ? .spring(response: 0.55, dampingFraction: 0.8, blendDuration: 0) : nil,
                    value: visualExpanded)
         .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85), value: model.visibleTimerAlarmTitle)
-        .padding(.horizontal, model.shelfRevealVisible ? 16 : (floatingSize == nil && !visualExpanded && model.visibleSystemNotificationPeek != nil ? 22 : (floatingSize == nil && !visualExpanded && model.cameraExclusion > 0 && !model.visibleAssistantPeek ? headerHorizontalPadding : notchContentHorizontalPadding(floating: floatingSize != nil, visualExpanded: visualExpanded,
-                                                           assistantPeek: model.visibleAssistantPeek, width: visualSize.width,
-                                                           cameraWidth: model.cameraExclusion))))
+        .padding(.horizontal, horizontalPadding)
         .padding(.vertical, floatingSize != nil && !visualExpanded ? 2 : (visualExpanded ? 12 : (model.shelfRevealVisible || model.dictationDisplayActive || model.visibleAgentTransientPeek != nil || model.visiblePermissionPeek != nil || model.visibleAssistantPeek || model.visibleAirDropPeek || model.visibleTrackSkipPeek != nil || model.visibleSystemNotificationPeek != nil || model.visibleFocusAlarmPeek != nil || model.showsCollapsedAgent ? 1 : (model.showsCompactMonitor ? compactMonitorVerticalPadding : (musicHeaderVisible ? max(0, (visualSize.height - 24.92) / 2) : 8)))))
         .frame(width: visualSize.width, height: visualSize.height, alignment: .top)
         // Keep the hit area outside the toolbar's layout so it cannot push the cards down.
@@ -6952,6 +7028,14 @@ struct NotchView: View {
                     HStack(spacing: 0) {
                         SKTUsageButton(controller: model.tethering)
                             .frame(width: Self.tetheringButtonWidth, height: 52)
+                        Button { model.select(.monitor) } label: {
+                            CompactMonitorBadge(model: model, diameter: 26, showsReadings: model.usageTrackingEnabled)
+                                .frame(width: Self.monitorButtonWidth, height: 52)
+                                .contentShape(Rectangle())
+                        }
+                        .help("시스템 모니터링 상세 보기")
+                        .accessibilityLabel("시스템 모니터링 상세 보기")
+                        .accessibilityValue(model.usageTrackingEnabled ? model.monitorSummary : "모니터링 꺼짐")
                         Button { model.toggleCompactStatusFromPanel() } label: {
                             NotchSilhouette(corners: NotchCorners(bottom: 2, shoulder: 2.5))
                                 .fill(.white.opacity(model.compactStatusVisible ? 1 : 0.55))
@@ -7009,7 +7093,7 @@ struct NotchView: View {
     private var homeEditorContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Text("홈 편집").font(.system(size: 14, weight: .semibold)); Spacer(); Button("완료") { model.finishEditing() }.buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 5).background(.white, in: Capsule()).foregroundStyle(.black) }
-            HomeView(model: model, agenda: model.agenda, contentWidth: visualSize.width)
+            HomeView(model: model, agenda: model.agenda, contentWidth: visualSize.width - 2 * horizontalPadding)
                 .frame(height: homeCardRowHeight(editing: true), alignment: .top)
             HomeEditorOptions(model: model)
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -7578,6 +7662,7 @@ struct NotchCorners: Equatable {
     static let legacy = NotchCorners(bottom: 16, shoulder: 20)
     // Equal radii make each upper shoulder a rotated copy of its lower corner.
     static let physical = NotchCorners(bottom: 10, shoulder: 10)
+    static let expanded = NotchCorners(bottom: notchCorners(for: 5).bottom, shoulder: physical.shoulder)
 
     static func physicalOutlineWidth(cameraWidth: CGFloat) -> CGFloat {
         // The path places its straight sides one shoulder in from each end.
@@ -7756,9 +7841,9 @@ struct HomeView: View {
     let contentWidth: CGFloat
     var flightNamespace: Namespace.ID? = nil
     @AppStorage("rium.card.style") private var cardStyle = "liquid"
-    private var narrow: Bool { contentWidth - 52 < 720 }
+    private var narrow: Bool { contentWidth < 720 }
     private var cardWidth: CGFloat {
-        (max(720, contentWidth - 52) - 3 * notchPanelSpacing) / 4
+        (max(720, contentWidth) - 3 * notchPanelSpacing) / 4
     }
     @ViewBuilder private var content: some View {
         if cardStyle == "dashboard" {
@@ -8093,9 +8178,27 @@ struct DictationView: View {
     }
 }
 
-private struct AgentQuestionKey: Hashable {
+private struct AgentQuestionKey: Hashable, Codable {
     let session: AgentSessionKey
     let question: String
+}
+
+private func hiddenAgentQuestionKeys(_ data: Data) -> [AgentQuestionKey] {
+    (try? JSONDecoder().decode([AgentQuestionKey].self, from: data)) ?? []
+}
+
+private func hiddenAgentSessions(_ data: Data) -> [AgentSessionKey] {
+    (try? JSONDecoder().decode([AgentSessionKey].self, from: data)) ?? []
+}
+
+private func updateHiddenAgentQuestions(_ data: Data, hiding key: AgentQuestionKey?, restoring session: AgentSessionKey? = nil) -> Data {
+    var keys = hiddenAgentQuestionKeys(data)
+    if let session { keys.removeAll { $0.session == session } }
+    if let key {
+        keys.removeAll { $0 == key }
+        keys.append(key)
+    }
+    return (try? JSONEncoder().encode(Array(keys.suffix(256)))) ?? data
 }
 
 private struct ClaudeApproval: Identifiable {
@@ -8301,6 +8404,8 @@ private struct AgentTransientPreview: View {
                         .modifier(AgentFlightGeometry(namespace: flightNamespace, session: agent.sessionKey, enabled: true))
                         .frame(width: side, height: geometry.size.height, alignment: .leading)
                         .clipped()
+                        .offset(x: showMonitor ? -compactMonitorTrailingOffset(width: model.currentNotchSize.width,
+                              cameraWidth: model.cameraExclusion, floating: model.floatingIslandPlacement != nil) : 0)
                     Color.clear.frame(width: gap).allowsHitTesting(false).accessibilityHidden(true)
                     Group {
                         if peek.kind == .completed {
@@ -8318,6 +8423,8 @@ private struct AgentTransientPreview: View {
                     .opacity(statusVisible ? 1 : 0)
                     .frame(width: min(side, agentPeekLabelWidth), height: geometry.size.height, alignment: .trailing)
                     .frame(width: side, height: geometry.size.height, alignment: .trailing).clipped()
+                    .offset(x: showMonitor ? compactMonitorTrailingOffset(width: model.currentNotchSize.width,
+                              cameraWidth: model.cameraExclusion, floating: model.floatingIslandPlacement != nil) : 0)
                 }
             }
             .frame(height: model.floatingIslandPlacement != nil ? 33 : min(33, max(0, model.currentNotchSize.height - 2)))
@@ -9248,6 +9355,7 @@ struct AgentView: View {
     @State private var answering: Set<AgentQuestionKey> = []
     @State private var answeredOrUncertain: Set<AgentQuestionKey> = []
     @State private var questionMessages: [AgentQuestionKey: String] = [:]
+    @AppStorage("rium.agent.hiddenQuestions") private var hiddenQuestionsData = Data()
     @State private var stopping: Set<AgentSessionKey> = []
     @State private var stopAccepted: Set<AgentSessionKey> = []
     @State private var stopUncertain: Set<AgentSessionKey> = []
@@ -9276,9 +9384,15 @@ struct AgentView: View {
                         }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).riumGlassTile()
                     }.buttonStyle(.plain).accessibilityLabel("Codex AI 대화 \(model.assistantStateLabel) 열기")
                 }
-                if model.externalAgentItems.isEmpty && model.assistantIndicator == .off && !model.assistantFinishing {
+                if model.externalAgentItems.isEmpty && model.hiddenAgentSessionKeys.isEmpty && model.assistantIndicator == .off && !model.assistantFinishing {
                     Text(model.agentStatus).font(.caption).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, minHeight: 80)
+                }
+                if !model.hiddenAgentSessionKeys.isEmpty {
+                    Button("숨긴 대화 모두 보기") {
+                        model.updateHiddenAgentSessions(hiding: nil)
+                    }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                        .help("작업 목록에서 닫은 대화를 다시 표시합니다")
                 }
                 ForEach(model.externalAgentItems, id: \.sessionKey) { item in
                     VStack(alignment: .leading, spacing: 9) {
@@ -9293,6 +9407,13 @@ struct AgentView: View {
                             Text("· \(item.project)").foregroundStyle(.secondary).lineLimit(1)
                             Spacer(minLength: 4)
                             if let age = item.ageSeconds { Text(age < 60 ? "\(age)초 전" : "\(age / 60)분 전").foregroundStyle(.secondary) }
+                            Button {
+                                model.updateHiddenAgentSessions(hiding: item.sessionKey)
+                            } label: {
+                                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                                    .frame(width: 28, height: 28).contentShape(Rectangle())
+                            }.buttonStyle(.plain).foregroundStyle(.secondary)
+                                .help("작업 목록에서 이 대화 닫기").accessibilityLabel("\(item.providerName) \(item.project) 대화 닫기")
                         }
                         HStack(spacing: 6) {
                             ForEach(Array(item.recentActivities.enumerated()), id: \.offset) { _, activity in
@@ -9307,8 +9428,17 @@ struct AgentView: View {
                             set: { if $0 { liveClaudeQuestions.insert(item.sessionKey) } else { liveClaudeQuestions.remove(item.sessionKey) } }))
                         if item.source == "codex" { CodexDesktopPanel(model: model, item: item) }
                         if item.source != "claude" || !liveClaudeQuestions.contains(item.sessionKey) {
+                            let hidden = Set(hiddenAgentQuestionKeys(hiddenQuestionsData))
                             ForEach(item.pendingQuestions) { question in
-                                questionView(question, for: item)
+                                if !hidden.contains(AgentQuestionKey(session: item.sessionKey, question: question.id)) {
+                                    questionView(question, for: item)
+                                }
+                            }
+                            if item.pendingQuestions.contains(where: { hidden.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id)) }) {
+                                Button("숨긴 질문 보기") {
+                                    hiddenQuestionsData = updateHiddenAgentQuestions(hiddenQuestionsData, hiding: nil, restoring: item.sessionKey)
+                                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                                    .help("이 작업에서 숨긴 질문 다시 보기")
                             }
                         }
                         if item.source == "codex" && !agentNeedsAttention(item.state) {
@@ -9362,7 +9492,18 @@ struct AgentView: View {
     private func questionView(_ question: PendingAgentQuestion, for item: AgentActivity) -> some View {
         let key = AgentQuestionKey(session: item.sessionKey, question: question.id)
         return VStack(alignment: .leading, spacing: 6) {
-            Text(question.title).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 8) {
+                Text(question.title).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    hiddenQuestionsData = updateHiddenAgentQuestions(hiddenQuestionsData, hiding: key)
+                } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                        .frame(width: 28, height: 28).contentShape(Rectangle())
+                }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("이 질문 숨기기").accessibilityLabel("이 질문 숨기기")
+                    .disabled(answering.contains(key))
+            }
             ForEach(Array(question.options.enumerated()), id: \.offset) { _, option in
                 Button { sendAnswer(item, question: question, answer: option) } label: {
                     HStack(alignment: .top, spacing: 6) {
@@ -10006,54 +10147,276 @@ private func reminderRowEntryScale() -> Double
 
 struct AgendaView: View {
     @ObservedObject var model: AgendaModel
+    let contentWidth: CGFloat
+    @Environment(\.calendar) private var calendar
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsTasks = false
 
-    private var reminderTransition: AnyTransition {
+    private let calendarTint = Color(red: 0.47, green: 0.70, blue: 1)
+    private let taskTint = Color(red: 0.43, green: 0.84, blue: 0.74)
+    private var narrow: Bool { contentWidth < 600 }
+    private var busy: Bool { model.calendarRequesting || model.calendarLoading || model.mutationInProgress }
+
+    private var taskTransition: AnyTransition {
         guard !reduceMotion else { return .identity }
         return .asymmetric(insertion: .move(edge: .top).combined(with: .opacity)
             .combined(with: .scale(scale: reminderRowEntryScale())),
                            removal: .move(edge: .trailing).combined(with: .opacity))
     }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("캘린더").font(.headline)
-                    Spacer()
-                    if model.calendarReadable { Button("추가") { model.addEvent() }.buttonStyle(.plain) }
-                    Button { model.loadCalendar() } label: {
-                        Text(model.calendarActionTitle).padding(.horizontal, 8).padding(.vertical, 5)
-                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
-                            .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("일정과 할 일").font(.system(size: 17, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 8)
+                if model.googleConnected {
+                    Menu {
+                        Button("연결 해제", role: .destructive) { model.disconnectGoogle() }
+                            .disabled(model.calendarRequesting || model.mutationInProgress)
+                    } label: {
+                        Image(systemName: "link")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .background(.white.opacity(0.08), in: Circle())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(model.calendarRequesting || model.calendarLoading || model.calendarAccess == .restricted)
-                }
-                Text(model.calendarStatus).font(.caption).foregroundStyle(.secondary)
-                ScrollView { VStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.events) { item in VStack(alignment: .leading) { Text(item.title); Text(item.subtitle).font(.caption).foregroundStyle(.secondary) } }
-                }.frame(maxWidth: .infinity, alignment: .leading) }
-            }.frame(maxWidth: .infinity, alignment: .topLeading)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack { Text("미리 알림").font(.headline); Spacer(); Button("추가") { model.addReminder() }.buttonStyle(.plain); Button("불러오기") { model.loadReminders() }.buttonStyle(.plain) }
-                Text(model.remindersStatus).font(.caption).foregroundStyle(.secondary)
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.reminders) { item in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(item.title)
-                                    Text(item.subtitle).font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("완료") { model.completeReminder(item.id) }.buttonStyle(.plain)
-                            }.transition(reminderTransition)
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("Google 연결 관리").accessibilityLabel("Google 연결 관리")
+                    Button { model.loadCalendar() } label: {
+                        if model.calendarLoading {
+                            ProgressView().controlSize(.small).frame(width: 28, height: 28)
+                        } else {
+                            toolbarIcon("arrow.clockwise")
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }.animation(reduceMotion ? nil : .spring(response: reminderListSpringResponse(), dampingFraction: 1), value: model.reminders.map(\.id))
-            }.frame(maxWidth: .infinity, alignment: .topLeading)
-        }.font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain).disabled(busy)
+                    .help("새로고침").accessibilityLabel("일정과 할 일 새로고침")
+                }
+            }.frame(minHeight: 29)
+
+            if !model.googleConnected {
+                connectionCard
+            } else if narrow {
+                Picker("표시할 목록", selection: $showsTasks) {
+                    Text("일정").tag(false)
+                    Text("할 일").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                if showsTasks { taskPanel } else { calendarPanel }
+            } else {
+                let calendarWidth = (contentWidth - 12) * 0.58
+                HStack(alignment: .top, spacing: 12) {
+                    calendarPanel.frame(width: calendarWidth)
+                    taskPanel
+                }
+            }
+        }
+        .font(.system(size: 12))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func toolbarIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 12, weight: .semibold))
+            .frame(width: 28, height: 28)
+            .background(.white.opacity(0.08), in: Circle())
+            .contentShape(Rectangle())
+    }
+
+    private var connectionCard: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "calendar.badge.checkmark")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(calendarTint)
+                .frame(width: 52, height: 52)
+                .background(calendarTint.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                .accessibilityHidden(true)
+            Text(model.calendarStatus).font(.system(size: 14, weight: .semibold))
+                .multilineTextAlignment(.center)
+            if !model.calendarRequesting {
+                Text("연결하면 Google Calendar와 Tasks를 여기에서 볼 수 있습니다.")
+                    .foregroundStyle(.white.opacity(0.64)).multilineTextAlignment(.center)
+                Button { model.loadCalendar() } label: {
+                    Label(model.calendarActionTitle, systemImage: "arrow.up.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14).frame(minHeight: 30)
+                        .background(calendarTint.opacity(0.22), in: Capsule())
+                        .contentShape(Capsule())
+                }.buttonStyle(.plain).disabled(busy).padding(.top, 3)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(.white.opacity(0.10), lineWidth: 1))
+    }
+
+    private func panel<Content: View>(title: String, subtitle: String, symbol: String, tint: Color, add: @escaping () -> Void,
+                                      @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(tint)
+                    .frame(width: 31, height: 31)
+                    .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 9))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                    Text(subtitle).font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.58))
+                }
+                Spacer(minLength: 4)
+                Button(action: add) { toolbarIcon("plus") }
+                    .buttonStyle(.plain).disabled(busy)
+                    .help("\(title) 추가").accessibilityLabel("\(title) 추가")
+            }.padding(11)
+            Rectangle().fill(.white.opacity(0.09)).frame(height: 1).accessibilityHidden(true)
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 15)
+                .fill(LinearGradient(colors: [tint.opacity(0.10), .white.opacity(0.045)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(.white.opacity(0.10), lineWidth: 1).allowsHitTesting(false))
+    }
+
+    private func statusLabel(_ message: String, symbol: String) -> some View {
+        Label(message, systemImage: symbol)
+            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.70))
+            .fixedSize(horizontal: false, vertical: true).padding(11)
+    }
+
+    private var calendarPanel: some View {
+        panel(title: "일정", subtitle: "앞으로 7일", symbol: "calendar", tint: calendarTint, add: model.addEvent) {
+            if model.events.isEmpty {
+                statusLabel(model.calendarStatus, symbol: model.calendarLoading ? "arrow.clockwise" : "calendar")
+            } else {
+                let today = calendar.startOfDay(for: .now)
+                let days = agendaEventDays(model.events, today: today, calendar: calendar)
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 11) {
+                        if model.calendarStatus != "앞으로 7일" {
+                            statusLabel(model.calendarStatus, symbol: model.calendarLoading ? "arrow.clockwise" : "info.circle")
+                        }
+                        ForEach(days, id: \.date) { day in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(spacing: 6) {
+                                    if day.date == today {
+                                        Text("오늘")
+                                            .foregroundStyle(calendarTint)
+                                    }
+                                    Text(agendaDayLabel(day.date))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                .font(.system(size: 11, weight: .semibold))
+                                .accessibilityAddTraits(.isHeader)
+                                ForEach(day.items) { item in eventRow(item, day: day.date) }
+                            }
+                        }
+                    }.padding(11)
+                }
+            }
+        }
+    }
+
+    private func agendaDayLabel(_ date: Date?) -> String {
+        guard let date else { return "날짜 미정" }
+        return date.formatted(.dateTime.month(.defaultDigits).day().weekday(.wide).locale(Locale(identifier: "ko_KR")))
+    }
+
+    private func eventRow(_ item: AgendaModel.Item, day: Date?) -> some View {
+        let tint = item.color.map(Color.init(nsColor:)) ?? calendarTint
+        let continues = !item.allDay && item.start.map { $0 < (day ?? $0) } == true
+        return HStack(spacing: 9) {
+            Text(continues ? "진행 중" : agendaTimeLabel(item))
+                .font(.system(size: 11, weight: .medium)).monospacedDigit()
+                .foregroundStyle(continues ? calendarTint : .white.opacity(0.72))
+                .lineLimit(1).frame(width: 45, alignment: .leading)
+            Text(item.title).font(.system(size: 12, weight: .medium))
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, 12).padding(.trailing, 7).padding(.vertical, 6)
+        .frame(minHeight: 31)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(alignment: .leading) {
+            Capsule().fill(tint).frame(width: 2).padding(.vertical, 6).padding(.leading, 4)
+                .accessibilityHidden(true)
+        }
+        .help(item.title)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var taskPanel: some View {
+        panel(title: "할 일", subtitle: "미완료 \(model.tasks.count)개", symbol: "checklist", tint: taskTint, add: model.addTask) {
+            if model.tasks.isEmpty {
+                statusLabel(model.tasksStatus, symbol: model.calendarLoading ? "arrow.clockwise" : "checkmark.circle")
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        if model.tasksStatus != "미완료 항목" {
+                            statusLabel(model.tasksStatus, symbol: model.calendarLoading ? "arrow.clockwise" : "info.circle")
+                        }
+                        ForEach(model.tasks) { item in
+                            taskRow(item).transition(taskTransition)
+                        }
+                    }
+                    .padding(11)
+                    .animation(reduceMotion ? nil : .spring(response: reminderListSpringResponse(), dampingFraction: 1),
+                               value: model.tasks.map(\.id))
+                }
+            }
+        }
+    }
+
+    private func taskRow(_ item: AgendaModel.Item) -> some View {
+        let overdue = item.start.map { $0 < calendar.startOfDay(for: .now) } ?? false
+        let listTitle = item.taskListTitle ?? ""
+        return HStack(alignment: .top, spacing: 6) {
+            Button { model.completeTask(item) } label: {
+                Circle()
+                    .strokeBorder(taskTint.opacity(0.73), lineWidth: 1.2)
+                    .frame(width: 15, height: 15)
+                    .frame(width: 27, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(busy)
+            .help("완료로 표시").accessibilityLabel("\(item.title) 완료")
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title).font(.system(size: 12, weight: .medium))
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                if !listTitle.isEmpty || item.start != nil {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 6) {
+                            if !listTitle.isEmpty { Text(listTitle).fixedSize() }
+                            taskDueDate(item.start, overdue: overdue)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            if !listTitle.isEmpty { Text(listTitle).lineLimit(1) }
+                            taskDueDate(item.start, overdue: overdue)
+                        }
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.59))
+                }
+            }
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.trailing, 5)
+        .background(.white.opacity(0.034), in: RoundedRectangle(cornerRadius: 7))
+        .help(item.title)
+    }
+
+    @ViewBuilder private func taskDueDate(_ date: Date?, overdue: Bool) -> some View {
+        if let date {
+            let label = date.formatted(.dateTime.month(.defaultDigits).day().locale(Locale(identifier: "ko_KR")))
+            Label(overdue ? "\(label) 마감 지남" : "\(label) 마감", systemImage: "clock")
+                .foregroundStyle(overdue ? Color(red: 1, green: 0.68, blue: 0.53) : taskTint)
+                .fixedSize()
         }
     }
 }
@@ -10144,6 +10507,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(CommandLine.arguments.contains("--ui-test") ? .regular : .accessory)
+        let lightStyleKey = "rium.light.style"
+        let preferences = UserDefaults.standard
+        if let style = preferences.string(forKey: lightStyleKey), style != "classic", style != "pixel" {
+            preferences.set("classic", forKey: lightStyleKey)
+        }
         EdgeWaveMetal.prepare()
         model.refreshDisplayChoices()
         model.onCordChange = { [weak self] in self?.updateCordPanel() }
@@ -10169,6 +10537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let initialScreen, showsNotchOnLaunch {
             alignNotchPanels(to: initialScreen)
         }
+        model.notchLightingVisible = false
         let hosting = NSHostingView(rootView: NotchContainer(model: model)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top))
         hosting.sizingOptions = []
@@ -10192,6 +10561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
         if initialScreen != nil, showsNotchOnLaunch {
             panel.orderFrontRegardless()
+            revealNotchLighting()
         }
         configureShortcutMonitor()
         installMediaKeyMonitor()
@@ -10199,7 +10569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeDisplayChanges()
         if initialScreen == nil { scheduleScreenRetry() }
         // Give the run loop an opportunity to present the notch before
-        // initializing speech locales, EventKit and filesystem watchers.
+        // initializing speech locales and filesystem watchers.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self else { return }
             self.model.startDeferredServices()
@@ -10208,7 +10578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if CommandLine.arguments.contains("--report-windows"), let dictation = self.model.preparedDictation {
                 let access = dictation.access
-                print("RIUM_AGENDA calendar_full=\(EKEventStore.authorizationStatus(for: .event) == .fullAccess) reminders_full=\(EKEventStore.authorizationStatus(for: .reminder) == .fullAccess)")
+                print("RIUM_AGENDA google_connected=\(self.model.agenda.googleConnected)")
                 print("RIUM_DICTATION accessibility=\(access.accessibility) speech=\(access.speech.rawValue) microphone=\(access.microphone.rawValue) input_monitoring=\(access.inputMonitoring) enabled=\(dictation.enabled) status=\(dictation.status)")
                 fflush(stdout)
             }
@@ -10709,6 +11079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         closeAgentSwitcher(restoreFocus: false)
         if model.screenshotEnabled { model.screenshotMonitor.cancelShortcutCapture() }
         model.setHoverSuspended(true)
+        model.notchLightingVisible = false
         if panel?.isVisible == true { panel.orderOut(nil) }
         updateMouseInterception()
         updateCordPanel()
@@ -10782,12 +11153,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alignNotchPanels(to: screen)
         updateMouseInterception(notifyHover: false, screen: screen)
         if bringToFront || !panel.isVisible { panel.orderFrontRegardless() }
+        revealNotchLighting()
         // shortcut: the separate effect panels are Rium's implementation;
         // their Space transition order has not been compared with the reference.
         updateCordPanel(bringToFront: bringToFront, screen: screen)
         updateEdgeWavePanel(bringToFront: bringToFront, screen: screen)
         if CommandLine.arguments.contains("--report-windows") { print("RIUM_REFLOW_EVENT notch=\(panel.frame) lighting=\(panel.frame)"); fflush(stdout) }
     }
+    private func revealNotchLighting() {
+        guard !model.notchLightingVisible else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
+            guard let self, self.panel?.isVisible == true, !self.screenAccessBlocked, !self.displaySleeping,
+                  !self.model.notchLightingVisible else { return }
+            self.model.notchLightingVisible = true
+        }
+    }
+
     @objc func show() { reflowDisplays() }
     func applicationDidResignActive(_ notification: Notification) {
         closeAgentSwitcher(restoreFocus: false)
@@ -10834,7 +11215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("탭 관리…", to: menu) { self.presentSettings(page: .tabs) }
         let featureItem = NSMenuItem(title: "다른 기능", action: nil, keyEquivalent: "")
         let sections: [(String, PanelSection)] = [
-            ("음악", .music), ("날씨", .weather), ("알림", .notifications), ("일정과 미리 알림", .agenda),
+            ("음악", .music), ("날씨", .weather), ("알림", .notifications), ("일정과 할 일", .agenda),
             ("보관함", .shelf), ("면접 코파일럿", .interview), ("집중 타이머", .monitor),
             ("메모", .notes), ("AI 대화", .assistant)
         ]
@@ -10870,7 +11251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationDidBecomeActive(_ notification: Notification) {
         guard model.deferredServicesStarted else { return }
-        model.agenda.refreshIfAuthorizationChanged(); model.dictation.restoreIfAuthorized()
+        model.agenda.refreshAuthorized(); model.dictation.restoreIfAuthorized()
         model.refreshTimerNotificationPermission(); model.refreshAgentNotificationPermission(); model.musicSpectrum.retryIfAuthorized()
     }
     func applicationWillTerminate(_ notification: Notification) {
@@ -10919,7 +11300,66 @@ private func publishedReceiveFixture(_ file: URL) -> Progress {
     return progress
 }
 
-if CommandLine.arguments.contains("--self-test-skt-usage") {
+if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || CommandLine.arguments.contains("--self-test-render-outward-wave") {
+    let environment = ProcessInfo.processInfo.environment
+    guard let output = environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
+    let elapsed = environment["RIUM_WAVE_TEST_TIME"].flatMap(Double.init) ?? 0.6
+    let waveColor = ScreenWaveColorMode(rawValue: environment["RIUM_RENDER_WAVE_COLOR_MODE"] ?? "") ?? .automatic
+    let baseRGB = environment["RIUM_RENDER_WAVE_BASE_COLOR"].flatMap { Int($0, radix: 16) } ?? NotchLightColor.defaultRGB
+    let customRGB = environment["RIUM_RENDER_WAVE_CUSTOM_COLOR"].flatMap { Int($0, radix: 16) } ?? NotchLightColor.defaultRGB
+    let tint = waveColor.tint(for: .agentDone, baseRGB: baseRGB, customRGB: customRGB)
+    _ = NSApplication.shared
+    let view = NSHostingView(rootView: ZStack {
+        Color.black
+        if CommandLine.arguments.contains("--self-test-render-perimeter-wave") {
+            DisplayPerimeterWave(started: 0, now: elapsed, tint: tint, surfaceStyle: 0)
+        } else {
+            AgentScreenWaveFallback(wave: NotchScreenWave(started: 0, kind: .agentDone),
+                                    notchFrame: CGRect(x: 380, y: 0, width: 240, height: 32),
+                                    now: elapsed, tint: tint, surfaceStyle: 0)
+        }
+    })
+    view.frame = NSRect(x: 0, y: 0, width: 1000, height: 650)
+    let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = view; view.layoutSubtreeIfNeeded()
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { fatalError("wave render unavailable") }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let data = rep.representation(using: .png, properties: [:]) else { fatalError("wave render failed") }
+    try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+    print("screen wave render self-test passed")
+} else if CommandLine.arguments.contains("--self-test-perimeter-wave") {
+    let baseRGB = 0xD32755
+    let customRGB = 0x2288E0
+    for kind: NotchLightCue.Kind? in [.agentDone, .agentQuestion, .clipboard, .clipboardPaste, nil] {
+        precondition(ScreenWaveColorMode.automatic.tint(for: kind, baseRGB: baseRGB, customRGB: customRGB) == edgeWaveTint(kind))
+        precondition(ScreenWaveColorMode.notch.tint(for: kind, baseRGB: baseRGB, customRGB: customRGB) == NotchLightColor.components(baseRGB))
+        precondition(ScreenWaveColorMode.custom.tint(for: kind, baseRGB: baseRGB, customRGB: customRGB) == NotchLightColor.components(customRGB))
+    }
+    precondition(perimeterWaveRange(elapsed: -.infinity) == nil && perimeterWaveRange(elapsed: .nan) == nil)
+    precondition(perimeterWaveRange(elapsed: 0) == nil && perimeterWaveRange(elapsed: 2.6) == nil)
+    let first = perimeterWaveRange(elapsed: 0.225)!
+    let halfway = perimeterWaveRange(elapsed: 1.125)!
+    let last = perimeterWaveRange(elapsed: 2.25)!
+    precondition(first.upperBound > 0 && first.upperBound < 0.2 && halfway.upperBound > 0.5 && last.upperBound == 1)
+    for offset in [-0.9, 0.9] {
+        var previous = 0.0
+        for step in 1...100 {
+            let elapsed = Double(step) * 2.25 / 100
+            let progress = perimeterWaveProgress(elapsed: elapsed, offset: offset)
+            precondition(progress > previous && perimeterWaveSpeed(elapsed: elapsed, offset: offset) > 0)
+            previous = progress
+        }
+        precondition(abs(previous - 1) < 0.0001)
+    }
+    precondition(abs(perimeterWaveProgress(elapsed: 0.90, offset: 0.9) - perimeterWaveProgress(elapsed: 0.90, offset: -0.9)) > 0.08)
+    precondition(abs(perimeterWaveSpeed(elapsed: 0.25, offset: 0.9) - perimeterWaveSpeed(elapsed: 0.25, offset: -0.9)) > 0.5)
+    let path = perimeterWavePath(size: CGSize(width: 1200, height: 800))
+    precondition(path.boundingRect == CGRect(x: 2, y: 2, width: 1196, height: 796))
+    precondition(perimeterWavePath(size: .zero).isEmpty)
+    precondition(NotchLightCue.Kind.agentRunning.supportsAgentScreenWave(style: "classic", waveStyle: "perimeter"))
+    precondition(!NotchLightCue.Kind.agentRunning.supportsAgentScreenWave(style: "classic", waveStyle: "notch"))
+    print("perimeter wave self-test passed")
+} else if CommandLine.arguments.contains("--self-test-skt-usage") {
     let row = ["통합공유 데이터 80GB", "50.52GB", "29.48GB", "-"]
     precondition(SKTSharedData.parse(rows: [row]) == SKTSharedData(remaining: "29.48GB", used: "50.52GB", allowance: "80GB"))
     precondition(SKTSharedData.parse(rows: [["데이터통화 무제한", "50GB", "무제한"]]) == nil)
@@ -11590,6 +12030,30 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
           !pending.contains(second), drafts[first] != drafts[second] else { fatalError("agent question state crossed sessions") }
     pending.remove(first); drafts.removeValue(forKey: first)
     guard pending.isEmpty, drafts[second] == "두 번째 답변" else { fatalError("agent question cleanup crossed sessions") }
+    var hidden = updateHiddenAgentQuestions(Data(), hiding: first)
+    hidden = updateHiddenAgentQuestions(hidden, hiding: second)
+    precondition(Set(hiddenAgentQuestionKeys(hidden)) == [first, second])
+    hidden = updateHiddenAgentQuestions(hidden, hiding: nil, restoring: codex.sessionKey)
+    precondition(hiddenAgentQuestionKeys(hidden) == [second])
+    precondition(hiddenAgentQuestionKeys(Data("invalid".utf8)).isEmpty)
+    let suite = "app.rium.notch.hidden-sessions-test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let model = Model(startServices: false, layoutPreferences: defaults)
+    model.agentItems = [codex, claude]
+    model.setUsageTrackingEnabled(true)
+    model.updateHiddenAgentSessions(hiding: codex.sessionKey)
+    precondition(model.visibleActiveAgentCount == 1 && model.externalAgentItems.map(\.sessionKey) == [claude.sessionKey])
+    precondition(combinedAgentLightState(model.externalAgentItems, assistant: .off).question)
+    model.updateHiddenAgentSessions(hiding: claude.sessionKey)
+    precondition(model.visibleActiveAgentCount == 0 && model.showsCompactMonitor && model.agentItems.count == 2)
+    precondition(!combinedAgentLightState(model.externalAgentItems, assistant: .off).active)
+    let restored = Model(startServices: false, layoutPreferences: defaults)
+    restored.agentItems = [codex, claude]
+    precondition(restored.externalAgentItems.isEmpty)
+    restored.updateHiddenAgentSessions(hiding: nil)
+    precondition(restored.visibleActiveAgentCount == 2)
+    precondition(hiddenAgentSessions(Data("invalid".utf8)).isEmpty)
     print("agent question identity self-test passed")
 } else if CommandLine.arguments.contains("--self-test-interview-generation") {
     var backlog = InterviewAudioBacklog<Int>()
@@ -12397,6 +12861,9 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
                  NotchCorners.physical.shoulder == NotchCorners.physical.bottom)
     precondition(physicalSilhouette.contains(CGPoint(x: shoulderMidX, y: 0.2)) &&
                  physicalSilhouette.contains(CGPoint(x: physicalRect.maxX - shoulderMidX, y: 0.2)))
+    precondition(physicalSilhouette.contains(CGPoint(x: shoulderMidX, y: 0.7)) &&
+                 physicalSilhouette.contains(CGPoint(x: physicalRect.maxX - shoulderMidX, y: 0.7)) &&
+                 !physicalSilhouette.contains(CGPoint(x: shoulderMidX, y: 1.1)))
     precondition(physicalSilhouette.contains(CGPoint(x: sides.minX + 0.1, y: 12)) &&
                  physicalSilhouette.contains(CGPoint(x: sides.maxX - 0.1, y: 12)) &&
                  !physicalSilhouette.contains(CGPoint(x: sides.minX - 0.1, y: 12)) &&
@@ -12426,8 +12893,10 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     let lightOnlyGeometry = Model(startServices: false)
     lightOnlyGeometry.cameraExclusion = 185; lightOnlyGeometry.cameraHeight = 32
     lightOnlyGeometry.toggleCompactStatusFromPanel()
-    lightOnlyGeometry.expanded = true
     precondition(lightOnlyGeometry.currentNotchCorners == .physical)
+    lightOnlyGeometry.expanded = true
+    precondition(lightOnlyGeometry.currentNotchCorners == .expanded)
+    precondition(NotchCorners.expanded == NotchCorners(bottom: 28, shoulder: 10))
     precondition(notchGeometryClose(targetSize, corners: bareCorners, targetSize: targetSize, targetCorners: bareCorners, tolerance: 0.2))
     precondition(!notchGeometryClose(intermediateSize, corners: bareCorners, targetSize: targetSize, targetCorners: bareCorners, tolerance: 0.2))
     precondition(!notchGeometryClose(targetSize, corners: bareCorners, targetSize: targetSize, targetCorners: expandedCorners, tolerance: 0.2))
@@ -12461,10 +12930,10 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     precondition(pointerOutlineSize(rendered: nil, target: targetSize) == targetSize)
     precondition(pointerOutlineSize(rendered: intermediateSize, target: targetSize) == intermediateSize)
     precondition(pointerOutlineSize(rendered: .zero, target: targetSize) == targetSize)
-    precondition(notchContentHorizontalPadding(floating: false, visualExpanded: true, assistantPeek: true, width: 870, cameraWidth: 185) == 26)
+    precondition(notchContentHorizontalPadding(floating: false, visualExpanded: true, assistantPeek: true, width: 870, cameraWidth: 185) == 19)
     precondition(notchContentHorizontalPadding(floating: false, visualExpanded: false, assistantPeek: true, width: 420, cameraWidth: 185) == 4)
     precondition(notchContentHorizontalPadding(floating: true, visualExpanded: false, assistantPeek: true, width: 420, cameraWidth: 185) == 8)
-    precondition(notchContentHorizontalPadding(floating: true, visualExpanded: true, assistantPeek: false, width: 870, cameraWidth: 185) == 26)
+    precondition(notchContentHorizontalPadding(floating: true, visualExpanded: true, assistantPeek: false, width: 870, cameraWidth: 185) == 19)
     let geometryModel = Model(startServices: false)
     geometryModel.noteRenderedNotchOutline(intermediateSize)
     precondition(geometryModel.renderedNotchOutlineSize == intermediateSize)
@@ -12533,31 +13002,43 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     // Expanded home cards extend beyond the old inset shoulders. Both card
     // edges and the right-side menu must remain inside the animated mask.
     let homeContent = CGSize(width: 870, height: 210)
-    let homeOutline = notchOutlineSize(content: homeContent, expanded: true, screenWidth: 1512)
-    precondition(homeOutline == CGSize(width: 942, height: 210))
-    let homeMask = AnimatedNotchBackdrop(width: homeOutline.width, height: homeOutline.height, corners: notchCorners(for: 5))
+    let homeOutline = notchOutlineSize(content: homeContent, screenWidth: 1512, shoulderOutset: NotchCorners.expanded.shoulder)
+    precondition(homeOutline == CGSize(width: 890, height: 210))
+    let homeMask = AnimatedNotchBackdrop(width: homeOutline.width, height: homeOutline.height, corners: .expanded)
         .path(in: CGRect(origin: .zero, size: homeContent))
     precondition(homeMask.contains(CGPoint(x: 18, y: 100)) && homeMask.contains(CGPoint(x: 852, y: 100)))
     precondition(homeMask.contains(CGPoint(x: 858, y: 55)))
-    let contentHit = NotchContentHitShape(outline: homeOutline, corners: notchCorners(for: 5))
+    let contentHit = NotchContentHitShape(outline: homeOutline, corners: .expanded)
         .path(in: CGRect(origin: .zero, size: homeContent))
     precondition(contentHit.contains(CGPoint(x: 3, y: 100)) && contentHit.contains(CGPoint(x: 867, y: 100)))
     precondition(!contentHit.contains(CGPoint(x: -5, y: 100)))
-    let smallContent = CGSize(width: notchWidth(expanded: true, displayWidth: 640), height: 210)
-    precondition(notchOutlineSize(content: smallContent, expanded: true, screenWidth: 640).width == 640)
-    // Check the padded content edges through the straight sides and rounded
-    // lower corners, including screens that require horizontal card scrolling.
+    // Both toolbar modes share the same outline and content clearance.
+    let panelModel = Model(startServices: false)
+    panelModel.cameraExclusion = 185; panelModel.cameraHeight = 32
     for displayWidth: CGFloat in [400, 640, 900, 1512] {
-        let content = CGSize(width: notchWidth(expanded: true, displayWidth: displayWidth), height: 210)
-        let outline = notchOutlineSize(content: content, expanded: true, screenWidth: displayWidth)
-        let rect = CGRect(origin: .zero, size: content)
-        let mask = AnimatedNotchBackdrop(width: outline.width, height: outline.height, corners: notchCorners(for: 5)).path(in: rect)
-        let hit = NotchContentHitShape(outline: outline, corners: notchCorners(for: 5)).path(in: rect)
-        precondition(outline.width <= displayWidth)
-        for y: CGFloat in [60, 100, 185, 197] {
-            for x in [CGFloat(26.5), content.width - 26.5] {
-                let point = CGPoint(x: x, y: y)
-                precondition(mask.contains(point) && hit.contains(point), "expanded content edge is clipped")
+        panelModel.displayWidth = displayWidth
+        for showsCompactStatus in [true, false] {
+            if panelModel.compactStatusVisible != showsCompactStatus {
+                panelModel.toggleCompactStatusFromPanel()
+            }
+            panelModel.expanded = true
+            let corners = panelModel.currentNotchCorners
+            precondition(corners == .expanded)
+            for section: PanelSection in [.home, .agents, .monitor, .agenda, .music] {
+                panelModel.section = section
+                let content = panelModel.expandedNotchSize
+                let height = content.height
+                let outline = panelModel.currentNotchOutlineSize
+                let rect = CGRect(origin: .zero, size: content)
+                let mask = AnimatedNotchBackdrop(width: outline.width, height: height, corners: corners).path(in: rect)
+                let hit = NotchContentHitShape(outline: outline, corners: corners).path(in: rect)
+                precondition(outline.width <= displayWidth && (outline.width - content.width) / 2 == corners.shoulder)
+                for y in [CGFloat(60), height / 2, height - 13] {
+                    for x in [expandedNotchContentInset, content.width - expandedNotchContentInset] {
+                        let point = CGPoint(x: x, y: y)
+                        precondition(mask.contains(point) && hit.contains(point), "expanded content edge is clipped")
+                    }
+                }
             }
         }
     }
@@ -12581,6 +13062,9 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     precondition(bothSides.gap == 193 && bothSides.side == 43)
     precondition(constrainedSides.gap == 193 && constrainedSides.side == 0)
     precondition(collapsedHeaderPadding(width: 200, cameraWidth: 185) == 3.5)
+    precondition(compactMonitorTrailingOffset(width: 285, cameraWidth: 185, floating: false) == 8)
+    precondition(compactMonitorTrailingOffset(width: 200, cameraWidth: 185, floating: false) == 0)
+    precondition(compactMonitorTrailingOffset(width: 285, cameraWidth: 185, floating: true) == 0)
     for timer in [false, true] {
         for height: CGFloat in [32, 38] {
             let size = calculateCollapsedNotchSize(cameraWidth: 185, cameraHeight: height, screenWidth: 1512,
@@ -15154,86 +15638,6 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     guard !replacementReceived else { fatalError("replaced file was delivered as the old screenshot") }
     replaced.stop(); print("screenshot monitor self-test passed")
-} else if CommandLine.arguments.contains("--self-test-reminder-list") {
-    let store = EKEventStore()
-    let list = EKCalendar(for: .reminder, eventStore: store)
-    list.title = "시험 목록"
-    let utc = TimeZone(secondsFromGMT: 0)!
-    let today = Date(timeIntervalSince1970: 1_700_000_000)
-    func reminder(_ title: String, due: Date? = nil, completed: Bool = false) -> EKReminder {
-        let item = EKReminder(eventStore: store)
-        item.calendar = list
-        item.title = title
-        item.dueDateComponents = due.map { reminderDueComponents($0, includeTime: true, timeZone: utc) }
-        item.isCompleted = completed
-        return item
-    }
-    let tiedDate = today.addingTimeInterval(3600)
-    let future = (1...24).map { index in
-        reminder("예약 \(index)", due: tiedDate.addingTimeInterval(Double(index) * 3600))
-    }
-    let overdue = reminder("기한 지난 항목", due: today.addingTimeInterval(-86400))
-    let datedB = reminder("B 같은 기한", due: tiedDate)
-    let datedA = reminder("A 같은 기한", due: tiedDate)
-    let input = [reminder("zeta"), datedB, overdue, reminder("alpha"), datedA, reminder("ZETA"),
-                 reminder("완료 항목", due: today.addingTimeInterval(-172800), completed: true)] + Array(future.reversed())
-    let snapshot = AgendaModel.projectReminders(input)
-    let model = AgendaModel(autoRefresh: false)
-    model.acceptReminderFetch(snapshot.rows, additions: snapshot.additions, generation: model.reminderGeneration)
-    let expected = ["기한 지난 항목", "B 같은 기한", "A 같은 기한"] + (1...24).map { "예약 \($0)" } + ["alpha", "zeta", "ZETA"]
-    precondition(model.reminders.map(\.title) == expected, "wrong reminder order, completed row, or truncated list")
-    precondition(model.reminders.first?.subtitle.hasPrefix("시험 목록 · ") == true)
-    precondition(model.reminders.last?.subtitle == "시험 목록" && model.reminders.last?.start == nil)
-    precondition(reminderListSpringResponse() == 0.30 && reminderRowEntryScale() == 0.96)
-    print("reminder list self-test passed (\(model.reminders.count) rows)")
-} else if CommandLine.arguments.contains("--self-test-reminder-completion") {
-    let model = AgendaModel(autoRefresh: false)
-    let store = EKEventStore()
-    let first = EKReminder(eventStore: store)
-    let second = EKReminder(eventStore: store)
-    let rows = [AgendaModel.Item(id: "first", title: "자료 확인", subtitle: "시험 목록"),
-                AgendaModel.Item(id: "second", title: "회의 준비", subtitle: "시험 목록")]
-    model.acceptReminderFetch(rows, additions: [], generation: model.reminderGeneration)
-    let oldFetch = model.reminderGeneration
-    var saves = 0
-    var refreshes = 0
-    var additions = 0
-    model.onAdded = { _ in additions += 1 }
-    model.completeReminder("first", find: { id in
-        precondition(id == "first")
-        return first
-    }, save: { reminder in
-        precondition(reminder === first && reminder.isCompleted && reminder.completionDate != nil)
-        precondition(model.reminders.map(\.id) == ["first", "second"])
-        saves += 1
-    }, refresh: { refreshes += 1 })
-    precondition(saves == 1 && refreshes == 1 && model.reminders.map(\.id) == ["second"])
-    model.acceptReminderFetch(rows, additions: [("first", Date())], generation: oldFetch)
-    precondition(model.reminders.map(\.id) == ["second"] && additions == 0)
-    model.completeReminder("first", find: { _ in fatalError("duplicate completion looked up the item") },
-                           save: { _ in fatalError("duplicate completion wrote to the store") },
-                           refresh: { fatalError("duplicate completion requested a refresh") })
-
-    let beforeError = model.reminderGeneration
-    model.completeReminder("second", find: { _ in second }, save: { _ in
-        throw CocoaError(.fileWriteNoPermission)
-    }, refresh: { fatalError("failed completion requested a refresh") })
-    precondition(!second.isCompleted && second.completionDate == nil && model.reminders.map(\.id) == ["second"])
-    model.acceptReminderFetch([], additions: [], generation: beforeError)
-    precondition(model.reminders.map(\.id) == ["second"] && model.remindersStatus == "미리 알림을 완료하지 못했습니다")
-
-    second.isCompleted = true
-    let externalDate = Date(timeIntervalSince1970: 1_700_000_000)
-    second.completionDate = externalDate
-    model.completeReminder("second", find: { _ in second }, save: { _ in
-        fatalError("already completed reminder was written again")
-    }, refresh: { refreshes += 1 })
-    precondition(second.completionDate == externalDate && model.reminders.isEmpty)
-    precondition(refreshes == 2 && model.remindersStatus == "미완료 항목 없음")
-    model.acceptReminderFetch([rows[1]], additions: [], generation: model.reminderGeneration)
-    precondition(model.reminders.map(\.id) == ["second"], "a current fetch could not show a reopened reminder")
-    precondition(reminderListSpringResponse() == 0.30)
-    print("reminder completion self-test passed")
 } else if CommandLine.arguments.contains("--self-test-agenda") {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     let dayEnd = now.addingTimeInterval(86_400)
@@ -15260,6 +15664,11 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     let late = AgendaModel.Item(id: "late", title: "late", subtitle: "", start: timelineDay.addingTimeInterval(19 * 3600), end: timelineDay.addingTimeInterval(23 * 3600))
     let allDay = AgendaModel.Item(id: "all-day", title: "all-day", subtitle: "", start: timelineDay, end: timelineDay.addingTimeInterval(86400), allDay: true)
     let continuing = AgendaModel.Item(id: "continuing", title: "continuing", subtitle: "", start: timelineDay.addingTimeInterval(-3600), end: timelineDay.addingTimeInterval(3600))
+    let laterDay = AgendaModel.Item(id: "later-day", title: "later day", subtitle: "", start: timelineDay.addingTimeInterval(90_000))
+    let undated = AgendaModel.Item(id: "undated", title: "undated", subtitle: "")
+    let agendaDays = agendaEventDays([continuing, allDay, early, late, laterDay, undated], today: timelineDay, calendar: timelineCalendar)
+    precondition(agendaDays.map(\.date) == [timelineDay, timelineDay.addingTimeInterval(86_400), nil])
+    precondition(agendaDays[0].items.map(\.id) == ["continuing", "all-day", "early", "late"])
     let selected = homeCalendarTimedEvents([allDay, continuing, early, late], now: now, calendar: timelineCalendar)
     guard selected.map(\.id) == ["early", "late"] else { fatalError("home calendar day selection failed") }
     guard let normalWindow = homeCalendarTimelineBounds(events: [allDay], now: now, calendar: timelineCalendar),
@@ -15275,12 +15684,6 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
           agendaRelativeLabel(item(start: 90 * 60, end: 7200), now: now) == "1시간 30분 후",
           agendaRelativeLabel(item(start: -10, end: 3600), now: now) == "진행 중",
           agendaTimeLabel(item(start: 0, end: 86400, allDay: true)) == "종일" else { fatalError("agenda label test failed") }
-    let utc = TimeZone(secondsFromGMT: 0)!
-    let dateOnly = reminderDueComponents(now, includeTime: false, timeZone: utc)
-    let timed = reminderDueComponents(now, includeTime: true, timeZone: utc)
-    guard dateOnly.calendar?.identifier == .gregorian, dateOnly.year == 2023, dateOnly.month == 11, dateOnly.day == 14,
-          dateOnly.hour == nil, dateOnly.minute == nil, dateOnly.timeZone == nil,
-          timed.calendar?.identifier == .gregorian, timed.hour == 22, timed.minute == 13, timed.timeZone == utc else { fatalError("reminder due-date components failed") }
     print("agenda self-test passed")
 } else if CommandLine.arguments.contains("--self-test-current-artwork") {
     guard let helper = Bundle.main.url(forAuxiliaryExecutable: "rium-notch-core") else { fatalError("media helper unavailable") }
@@ -15364,6 +15767,16 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     let pixel = idleColors()
     guard red.count > 0, red.red > red.blue * 2, blue.count > 0, blue.blue > blue.red * 2,
           pixel.count > blue.count else { fatalError("idle light render mismatch: red=\(red), blue=\(blue), pixel=\(pixel)") }
+    preferences.set("classic", forKey: "rium.light.style")
+    preferences.set(0.0, forKey: "rium.light.idleBrightnessPercent")
+    let idleOff = coverage()
+    preferences.set(50.0, forKey: "rium.light.idleBrightnessPercent")
+    let idleHalf = coverage()
+    preferences.set(100.0, forKey: "rium.light.idleBrightnessPercent")
+    let idleFull = coverage()
+    guard idleOff == 0, idleHalf > 0, idleFull > idleHalf else {
+        fatalError("idle brightness coverage mismatch: 0%=\(idleOff), 50%=\(idleHalf), 100%=\(idleFull)")
+    }
     print("light preferences self-test passed")
 } else if CommandLine.arguments.contains("--self-test-music-light") {
     precondition(NotchLightCue(kind: .musicPlayback(true), started: Date()).duration == 0.85)
@@ -15622,6 +16035,16 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
           artworkModel.mediaLightColor == defaultMusicLightColor else { fatalError("missing artwork retained previous presentation") }
     print("music light self-test passed")
 } else if CommandLine.arguments.contains("--self-test-light") {
+    precondition(IdleLightSettings.clampedPercent(-1) == 0 && IdleLightSettings.clampedPercent(101) == 100)
+    precondition(IdleLightSettings.clampedPercent(.nan) == IdleLightSettings.defaultPercent)
+    let fadeSamples = [0.0, 0.03, 0.06, 0.12, 0.6, 1.11, 1.23, 1.32, 1.35].map {
+        notchLightFadeEnvelope(elapsed: $0, duration: 1.35)
+    }
+    precondition(fadeSamples[0] == 0 && fadeSamples[1] > 0 && fadeSamples[1] < fadeSamples[2])
+    precondition(abs(fadeSamples[2] - 0.5) < 0.001 && fadeSamples[3] == 1 && fadeSamples[4] == 1)
+    precondition(fadeSamples[5] > fadeSamples[6] && fadeSamples[6] > fadeSamples[7] && fadeSamples[7] > 0 && fadeSamples[8] == 0)
+    precondition(notchLightFadeEnvelope(elapsed: 2, duration: .infinity) == 1)
+    precondition(notchLightFadeEnvelope(elapsed: -0.01, duration: 1.35) == 0)
     precondition(notchEventLightHeight(kind: .agentMessage, notchHeight: 32) == 112)
     precondition(notchEventLightHeight(kind: .clipboard, notchHeight: 32) == 80)
     let copyPadding = notchEventHorizontalPadding(kind: .clipboard, notchWidth: 220, armWidth: 680, corners: .legacy)
@@ -16392,7 +16815,16 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     } else {
         model.agentItems = [AgentActivity(id: "fixture", project: "fixture", state: "작업 중", activity: "")]
     }
-    let view = NSHostingView(rootView: NotchContainer(model: model))
+    let suite = "app.rium.notch.test.ambient.\(UUID().uuidString)"
+    guard let preferences = UserDefaults(suiteName: suite) else { fatalError("isolated ambient preferences required") }
+    defer { preferences.removePersistentDomain(forName: suite) }
+    if let mode = environment["RIUM_RENDER_IDLE_BRIGHTNESS_MODE"] {
+        preferences.set(mode, forKey: "rium.light.idleBrightnessMode")
+    }
+    if let percent = environment["RIUM_RENDER_IDLE_BRIGHTNESS"].flatMap(Double.init) {
+        preferences.set(percent, forKey: "rium.light.idleBrightnessPercent")
+    }
+    let view = NSHostingView(rootView: NotchContainer(model: model).defaultAppStorage(preferences))
     view.frame = NSRect(x: 0, y: 0, width: 1100, height: 90)
     let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false)
     window.isOpaque = false; window.backgroundColor = .clear; window.contentView = view
@@ -16405,8 +16837,17 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
     guard let output = ProcessInfo.processInfo.environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
     _ = NSApplication.shared
     let model = Model(startServices: false)
-    let cueKind: NotchLightCue.Kind = CommandLine.arguments.contains("--self-test-render-agent-approval") ? .agentApproval : (CommandLine.arguments.contains("--self-test-render-agent-done") ? .agentDone : (CommandLine.arguments.contains("--self-test-render-system-light") ? .systemControl : .airDrop))
-    model.lightCue = NotchLightCue(kind: cueKind, started: Date().addingTimeInterval(cueKind == .agentApproval || cueKind == .agentDone ? -0.3 : -0.8))
+    let environment = ProcessInfo.processInfo.environment
+    let systemKind: NotchLightCue.Kind
+    switch environment["RIUM_RENDER_SYSTEM_CONTROL"] {
+    case "volume": systemKind = .systemLevel(72)
+    case "brightness": systemKind = .brightness(72)
+    default: systemKind = .systemControl
+    }
+    let cueKind: NotchLightCue.Kind = CommandLine.arguments.contains("--self-test-render-agent-approval") ? .agentApproval : (CommandLine.arguments.contains("--self-test-render-agent-done") ? .agentDone : (CommandLine.arguments.contains("--self-test-render-system-light") ? systemKind : .airDrop))
+    let elapsed = environment["RIUM_RENDER_LIGHT_ELAPSED"].flatMap(Double.init)
+        ?? (cueKind == .agentApproval || cueKind == .agentDone ? 0.3 : 0.8)
+    model.lightCue = NotchLightCue(kind: cueKind, started: Date().addingTimeInterval(-elapsed))
     let view = NSHostingView(rootView: NotchContainer(model: model))
     view.frame = NSRect(x: 0, y: 0, width: 1000, height: 90)
     let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false)
@@ -16490,8 +16931,9 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
         model.cpuHistory = [Double(environment["RIUM_MONITOR_CPU"] ?? "45")]
         model.memoryHistory = [Double(environment["RIUM_MONITOR_RAM"] ?? "72")]
         model.pressure = environment["RIUM_MONITOR_PRESSURE"] ?? "정상"
-        if let phase = environment["RIUM_MONITOR_AGENT"], ["1", "preview", "completed"].contains(phase) {
-            let agent = AgentActivity(id: "fixture", project: "시험", state: phase == "completed" ? "완료" : "작업 중", activity: "")
+        if let phase = environment["RIUM_MONITOR_AGENT"], ["1", "preview", "completed", "waiting"].contains(phase) {
+            let state = phase == "completed" ? "완료" : (phase == "waiting" ? "질문 대기" : "작업 중")
+            let agent = AgentActivity(id: "fixture", project: "시험", state: state, activity: "")
             model.agentItems = [agent]
             if phase == "preview" { model.showAgentTransientPeek(agent, kind: .running) }
             if phase == "completed" { model.showAgentTransientPeek(agent, kind: .completed) }
@@ -16587,15 +17029,20 @@ if CommandLine.arguments.contains("--self-test-skt-usage") {
                                   usageUpdatedAt: model.now)]
         model.setHomeShowsCodexUsage(true)
     }
-    if CommandLine.arguments.contains("--self-test-render-agenda") {
+    let rendersAgenda = CommandLine.arguments.contains("--self-test-render-agenda")
+    if rendersAgenda {
         model.section = .agenda
-        let agenda = model.agenda
-        agenda.acceptReminderFetch([AgendaModel.Item(id: "reminder-a", title: "자료 확인", subtitle: "시험 목록"),
-                                    AgendaModel.Item(id: "reminder-b", title: "회의 준비", subtitle: "시험 목록")],
-                                   additions: [], generation: agenda.reminderGeneration)
+        let environment = ProcessInfo.processInfo.environment
+        if let width = environment["RIUM_RENDER_AGENDA_DISPLAY_WIDTH"].flatMap(Double.init) {
+            model.displayWidth = CGFloat(width)
+        }
+        let mode = environment["RIUM_RENDER_AGENDA_STATE"]
+        model.agenda.prepareAgendaRender(connected: mode != "disconnected", empty: mode == "empty", now: model.now)
+    } else {
+        model.agenda.events = [AgendaModel.Item(id: "fixture", title: "제작 회의", subtitle: "", start: model.now.addingTimeInterval(1800), end: model.now.addingTimeInterval(5400))]
     }
-    model.agenda.events = [AgendaModel.Item(id: "fixture", title: "제작 회의", subtitle: "", start: model.now.addingTimeInterval(1800), end: model.now.addingTimeInterval(5400))]
-    let view = NSHostingView(rootView: NotchContainer(model: model)); view.frame = NSRect(origin: .zero, size: model.currentNotchSize)
+    let view = NSHostingView(rootView: NotchContainer(model: model))
+    view.frame = NSRect(origin: .zero, size: rendersAgenda ? model.currentNotchOutlineSize : model.currentNotchSize)
     let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false); window.contentView = view
     view.layoutSubtreeIfNeeded()
     guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { fatalError("render unavailable") }

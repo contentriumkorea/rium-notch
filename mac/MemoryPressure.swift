@@ -34,6 +34,7 @@ struct CompactMonitorBadge: View {
 
     @ObservedObject var model: Model
     var diameter: CGFloat = CompactMonitorBadge.size
+    var showsReadings = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var arcTint: Color {
@@ -46,8 +47,11 @@ struct CompactMonitorBadge: View {
     }
 
     var body: some View {
-        let ramHeadroom = (model.memoryHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
-        let cpuHeadroom = (model.cpuHistory.last ?? nil).map { min(1, max(0, 1 - $0 / 100)) } ?? 0
+        let ramUsage = showsReadings ? (model.memoryHistory.last ?? nil) : nil
+        let cpuUsage = showsReadings ? (model.cpuHistory.last ?? nil) : nil
+        let ramHeadroom = ramUsage.map { min(1, max(0, 1 - $0 / 100)) } ?? 0
+        let cpuHeadroom = cpuUsage.map { min(1, max(0, 1 - $0 / 100)) } ?? 0
+        let arcTint = showsReadings ? self.arcTint : .white
         let strokeWidth = diameter * 0.085
         let dotDiameter = diameter * 0.113
         let outerMargin = diameter * 0.01
@@ -58,7 +62,7 @@ struct CompactMonitorBadge: View {
         // Compensate for the round stroke cap so its visible gap matches the dot spacing.
         let arcStartDegrees = 147.68
         let arcFraction = (540 - 2 * arcStartDegrees) / 360
-        let quotaText = model.monitorCodexRemaining.map(String.init) ?? "—"
+        let quotaText = (showsReadings ? model.monitorCodexRemaining : nil).map(String.init) ?? "—"
         ZStack {
             ZStack {
                 Circle().trim(from: 0, to: arcFraction).stroke(arcTint.opacity(0.22), style: stroke)

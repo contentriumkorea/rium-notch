@@ -160,6 +160,7 @@ private final class EdgeWaveMetalView: MTKView, MTKViewDelegate {
     var heldProgress: Double?
     var lightThickness: CGFloat = 1
     var surfaceStyle: Float = 0
+    var tint = edgeWaveTint(nil)
     var onFailure: (() -> Void)?
     private var failureStarted: TimeInterval?
     private var failureReported = false
@@ -203,7 +204,6 @@ private final class EdgeWaveMetalView: MTKView, MTKViewDelegate {
             ?? max(0, min(20 * scale, height / 3, width / 3))
         let originX = notchOrigin.map { $0.x * scale } ?? view.drawableSize.width / 2
         let originY = notchOrigin.map { $0.y * scale } ?? height
-        let tint = edgeWaveTint(cue.agentKind)
         let thickness = lightThickness.isFinite ? min(2, max(0.5, lightThickness)) : 1
         let now = ProcessInfo.processInfo.systemUptime
         let elapsed = max(0, now - cue.started)
@@ -239,6 +239,7 @@ struct EdgeWaveMetal: NSViewRepresentable {
     var heldProgress: Double? = nil
     var lightThickness: CGFloat = 1
     var surfaceStyle: Float = 0
+    let tint: ScreenWaveTint
     let onFailure: () -> Void
     static func prepare() { WaveMetalResources.prepare() }
     static var available: Bool {
@@ -252,6 +253,7 @@ struct EdgeWaveMetal: NSViewRepresentable {
         if wave.cue?.id != cue.id { wave.resetFailure() }
         wave.cue = cue; wave.notchSize = notchSize; wave.heldProgress = heldProgress
         wave.notchOrigin = notchOrigin; wave.floatingRadius = floatingRadius
-        wave.lightThickness = lightThickness; wave.surfaceStyle = surfaceStyle; wave.onFailure = onFailure
+        wave.lightThickness = lightThickness; wave.surfaceStyle = surfaceStyle; wave.tint = tint
+        wave.onFailure = onFailure
     }
 }

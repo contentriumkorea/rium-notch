@@ -428,9 +428,13 @@ func pixelGridVisibleRange(lower: CGFloat, upper: CGFloat, spacing: CGFloat, cou
 enum NotchLightColor {
     static let defaultRGB = 0x52A6FF
 
+    static func components(_ rgb: Int) -> (red: Double, green: Double, blue: Double) {
+        (Double((rgb >> 16) & 255) / 255, Double((rgb >> 8) & 255) / 255, Double(rgb & 255) / 255)
+    }
+
     static func color(_ rgb: Int) -> Color {
-        Color(.sRGB, red: Double((rgb >> 16) & 255) / 255,
-              green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255)
+        let tint = components(rgb)
+        return Color(.sRGB, red: tint.red, green: tint.green, blue: tint.blue)
     }
 
     static func rgb(_ color: Color) -> Int? {
