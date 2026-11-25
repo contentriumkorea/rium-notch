@@ -11359,23 +11359,19 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
         precondition(ScreenWaveColorMode.custom.tint(for: kind, baseRGB: baseRGB, customRGB: customRGB) == NotchLightColor.components(customRGB))
     }
     precondition(perimeterWaveRange(elapsed: -.infinity) == nil && perimeterWaveRange(elapsed: .nan) == nil)
-    precondition(perimeterWaveRange(elapsed: 0) == nil && perimeterWaveRange(elapsed: 2.6) == nil)
-    let first = perimeterWaveRange(elapsed: 0.225)!
-    let halfway = perimeterWaveRange(elapsed: 1.125)!
-    let last = perimeterWaveRange(elapsed: 2.25)!
-    precondition(first.upperBound > 0 && first.upperBound < 0.2 && halfway.upperBound > 0.5 && last.upperBound == 1)
-    for offset in [-0.9, 0.9] {
-        var previous = 0.0
-        for step in 1...100 {
-            let elapsed = Double(step) * 2.25 / 100
-            let progress = perimeterWaveProgress(elapsed: elapsed, offset: offset)
-            precondition(progress > previous && perimeterWaveSpeed(elapsed: elapsed, offset: offset) > 0)
-            previous = progress
-        }
-        precondition(abs(previous - 1) < 0.0001)
+    precondition(perimeterWaveRange(elapsed: 0) == nil && perimeterWaveRange(elapsed: perimeterWaveDuration) == nil)
+    let first = perimeterWaveRange(elapsed: perimeterWaveLapDuration * 0.1)!
+    let halfway = perimeterWaveRange(elapsed: perimeterWaveLapDuration * 0.5)!
+    let last = perimeterWaveRange(elapsed: perimeterWaveLapDuration)!
+    precondition(abs(first.upperBound - 0.1) < 0.0001 && abs(halfway.upperBound - 0.5) < 0.0001 && last.upperBound == 1)
+    var previous = 0.0
+    for step in 1...100 {
+        let elapsed = Double(step) * perimeterWaveLapDuration / 100
+        let progress = perimeterWaveProgress(elapsed: elapsed)
+        precondition(abs((progress - previous) - 0.01) < 0.000001)
+        previous = progress
     }
-    precondition(abs(perimeterWaveProgress(elapsed: 0.90, offset: 0.9) - perimeterWaveProgress(elapsed: 0.90, offset: -0.9)) > 0.08)
-    precondition(abs(perimeterWaveSpeed(elapsed: 0.25, offset: 0.9) - perimeterWaveSpeed(elapsed: 0.25, offset: -0.9)) > 0.5)
+    precondition(abs(previous - 1) < 0.0001)
     let path = perimeterWavePath(size: CGSize(width: 1200, height: 800))
     precondition(path.boundingRect == CGRect(x: 2, y: 2, width: 1196, height: 796))
     precondition(perimeterWavePath(size: .zero).isEmpty)

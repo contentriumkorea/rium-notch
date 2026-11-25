@@ -303,39 +303,19 @@ private struct AnimatedFullScreenEdgeWave: View {
     }
 }
 
-private func perimeterWavePulses(offset: Double) -> [(start: Double, end: Double, weight: Double)] {
-    offset >= 0 ? [(0.05, 0.25, 0.25), (0.27, 0.49, 0.40), (0.62, 0.86, 0.35)]
-                : [(0.13, 0.34, 0.32), (0.40, 0.64, 0.35), (0.68, 0.90, 0.33)]
+// The reference covers approximately one perimeter in 1.24 seconds.
+let perimeterWaveLapDuration: TimeInterval = 1.24
+let perimeterWaveTailLength: CGFloat = 0.15
+let perimeterWaveDuration = perimeterWaveLapDuration * (1 + Double(perimeterWaveTailLength))
+
+func perimeterWaveProgress(elapsed: TimeInterval) -> Double {
+    elapsed / perimeterWaveLapDuration
 }
 
-private func perimeterSmoothStep(_ value: Double) -> Double {
-    let x = min(1, max(0, value))
-    return x * x * x * (x * (x * 6 - 15) + 10)
-}
-
-// Each burst has zero acceleration at its endpoints, so changes of pace flow together.
-func perimeterWaveProgress(elapsed: TimeInterval, offset: Double) -> Double {
-    let phase = elapsed / 2.25
-    guard phase < 1 else { return 1 + 0.22 * (phase - 1) }
-    let bursts = perimeterWavePulses(offset: offset).reduce(0.0) { total, pulse in
-        total + pulse.weight * perimeterSmoothStep((phase - pulse.start) / (pulse.end - pulse.start))
-    }
-    return 0.22 * phase + 0.78 * bursts
-}
-
-func perimeterWaveSpeed(elapsed: TimeInterval, offset: Double) -> Double {
-    let phase = elapsed / 2.25
-    guard phase < 1 else { return 0.22 }
-    return 0.22 + 0.78 * perimeterWavePulses(offset: offset).reduce(0.0) { total, pulse in
-        let x = min(1, max(0, (phase - pulse.start) / (pulse.end - pulse.start)))
-        return total + pulse.weight * 30 * x * x * (1 - x) * (1 - x) / (pulse.end - pulse.start)
-    }
-}
-
-func perimeterWaveRange(elapsed: TimeInterval, offset: Double = 0.9) -> ClosedRange<CGFloat>? {
-    guard elapsed.isFinite, elapsed >= 0, elapsed < 2.6 else { return nil }
-    let head = CGFloat(perimeterWaveProgress(elapsed: elapsed, offset: offset))
-    let start = max(0, head - 0.15), end = min(1, head)
+func perimeterWaveRange(elapsed: TimeInterval) -> ClosedRange<CGFloat>? {
+    guard elapsed.isFinite, elapsed >= 0, elapsed < perimeterWaveDuration else { return nil }
+    let head = CGFloat(perimeterWaveProgress(elapsed: elapsed))
+    let start = max(0, head - perimeterWaveTailLength), end = min(1, head)
     return start < end ? start...end : nil
 }
 
@@ -367,14 +347,10 @@ struct DisplayPerimeterWave: View {
     var body: some View {
         Canvas { context, size in
             let elapsed = now - started
-            guard elapsed.isFinite, elapsed >= 0, elapsed < 2.6, size.width > 8, size.height > 8 else { return }
+            guard elapsed.isFinite, elapsed >= 0, elapsed < perimeterWaveDuration, size.width > 8, size.height > 8 else { return }
             let path = perimeterWavePath(size: size)
-            let fade = notchLightFadeEnvelope(elapsed: elapsed, duration: 2.6, attack: 0.15, release: 0.25)
-            let offset = 0.9
-            if let range = perimeterWaveRange(elapsed: elapsed, offset: offset) {
-                let speed = perimeterWaveSpeed(elapsed: elapsed, offset: offset)
-                let burst = perimeterSmoothStep((speed - 0.3) / 2.5)
-                let pulse = 0.72 + 0.28 * burst
+            let fade = notchLightFadeEnvelope(elapsed: elapsed, duration: perimeterWaveDuration, attack: 0.10, release: 0.15)
+            if let range = perimeterWaveRange(elapsed: elapsed) {
                 let pieces: [(Path, Double)] = (0..<40).map { index in
                     let start = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index) / 40
                     let end = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index + 1) / 40
@@ -387,7 +363,7 @@ struct DisplayPerimeterWave: View {
                     light.addFilter(.blur(radius: blur))
                     light.drawLayer { layer in
                         for (segment, brightness) in pieces {
-                            layer.stroke(segment, with: .color(edgeWaveFallbackColor(tint, opacity: opacity * fade * pulse * brightness, style: surfaceStyle)),
+                            layer.stroke(segment, with: .color(edgeWaveFallbackColor(tint, opacity: opacity * fade * brightness, style: surfaceStyle)),
                                          style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
                         }
                     }
