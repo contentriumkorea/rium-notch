@@ -9466,8 +9466,9 @@ struct AgentView: View {
                         if item.source == "codex" && !agentNeedsAttention(item.state) && item.pendingQuestions.isEmpty {
                             HStack(alignment: .bottom, spacing: 7) {
                                 TextField("Codex에 후속 메시지", text: Binding(
-                                    get: { drafts[item.sessionKey] ?? "" }, set: { drafts[item.sessionKey] = $0 }), axis: .vertical)
-                                    .textFieldStyle(.roundedBorder).lineLimit(1...3)
+                                    get: { drafts[item.sessionKey] ?? "" }, set: { drafts[item.sessionKey] = $0 }))
+                                    .textFieldStyle(.roundedBorder)
+                                    .onSubmit { sendFollowup(item) }
                                     .disabled(sending.contains(item.sessionKey) || uncertain.contains(item.sessionKey))
                                 Button("전송") { sendFollowup(item) }.buttonStyle(.plain)
                                     .disabled(sending.contains(item.sessionKey) || uncertain.contains(item.sessionKey)
@@ -9537,7 +9538,8 @@ struct AgentView: View {
             }
             if item.source == "codex" {
                 HStack(alignment: .bottom, spacing: 7) {
-                    TextField(question.options.isEmpty ? "답변 입력" : "직접 답변 입력", text: Binding(get: { questionDrafts[key] ?? "" }, set: { questionDrafts[key] = $0 }), axis: .vertical)
+                    TextField(question.options.isEmpty ? "답변 입력" : "직접 답변 입력", text: Binding(get: { questionDrafts[key] ?? "" }, set: { questionDrafts[key] = $0 }))
+                        .onSubmit { sendAnswer(item, question: question, answer: questionDrafts[key] ?? "") }
                         .textFieldStyle(.roundedBorder).lineLimit(1...3)
                         .disabled(answering.contains(key) || answeredOrUncertain.contains(key))
                     Button("답변") { sendAnswer(item, question: question, answer: questionDrafts[key] ?? "") }
