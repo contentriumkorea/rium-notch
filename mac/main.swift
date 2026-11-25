@@ -1652,6 +1652,7 @@ final class Model: ObservableObject {
                 agentActionHoldUntil = 0
                 setClipboardSearchEditing(false)
                 setWeatherCityEditing(false)
+                setAgentMessageEditing(false)
                 setNotesEditing(false)
                 clipboardHistoryDestination = nil
                 presentDeferredRunningPeek()
@@ -2350,6 +2351,7 @@ final class Model: ObservableObject {
     @Published private(set) var assistantEditing = false
     @Published private(set) var promptEditing = false
     @Published private(set) var clipboardSearchEditing = false
+    @Published private(set) var agentMessageEditing = false
     var onNotchTextKeyChange: ((Bool) -> Void)?
     @Published var now = Date()
     private var observedDayStart = Calendar.current.startOfDay(for: Date())
@@ -3139,11 +3141,12 @@ final class Model: ObservableObject {
             hoverWork?.cancel(); hoverWork = nil
             setClipboardSearchEditing(false)
             setWeatherCityEditing(false)
+            setAgentMessageEditing(false)
             clipboardPasteGeneration &+= 1
             clipboardHistoryDestination = nil
         }
     }
-    private var hoverEditingBlocksCollapse: Bool { tabEditing || notesEditing || promptEditing || assistantEditing || clipboardSearchEditing || weatherCityEditing }
+    private var hoverEditingBlocksCollapse: Bool { tabEditing || notesEditing || promptEditing || assistantEditing || clipboardSearchEditing || weatherCityEditing || agentMessageEditing }
 
     fileprivate func holdExpandedNotchAfterAgentAction() {
         guard expanded else { return }
@@ -3455,6 +3458,7 @@ final class Model: ObservableObject {
         if next != .teleprompter { setPromptEditing(false) }
         if next != .assistant { setAssistantEditing(false) }
         if next != .weather { setWeatherCityEditing(false) }
+        if next != .agents { setAgentMessageEditing(false) }
         if next == .clipboard && section != .clipboard && expanded { rememberClipboardDestination() }
         if next != .clipboard {
             setClipboardSearchEditing(false)
@@ -3496,6 +3500,14 @@ final class Model: ObservableObject {
         guard !editing || (expanded && section == .weather && !hoverSuspended && notchScreenAvailable),
               editing != weatherCityEditing else { return }
         weatherCityEditing = editing
+        hoverWork?.cancel(); hoverWork = nil
+        onNotchTextKeyChange?(editing)
+    }
+
+    func setAgentMessageEditing(_ editing: Bool) {
+        guard !editing || (expanded && section == .agents && !hoverSuspended && notchScreenAvailable),
+              editing != agentMessageEditing else { return }
+        agentMessageEditing = editing
         hoverWork?.cancel(); hoverWork = nil
         onNotchTextKeyChange?(editing)
     }
@@ -9368,7 +9380,12 @@ private struct AgentKeyboardSwitcherView: View {
 }
 
 struct AgentView: View {
+    private enum InputFocus: Hashable {
+        case followup(AgentSessionKey)
+        case answer(AgentQuestionKey)
+    }
     @ObservedObject var model: Model
+    @FocusState private var focusedInput: InputFocus?
     var flightNamespace: Namespace.ID? = nil
     @State private var drafts: [AgentSessionKey: String] = [:]
     @State private var sending: Set<AgentSessionKey> = []
@@ -9468,6 +9485,11 @@ struct AgentView: View {
                                 TextField("Codex에 후속 메시지", text: Binding(
                                     get: { drafts[item.sessionKey] ?? "" }, set: { drafts[item.sessionKey] = $0 }))
                                     .textFieldStyle(.roundedBorder)
+                                    .focused($focusedInput, equals: .followup(item.sessionKey))
+                                    .simultaneousGesture(TapGesture().onEnded {
+                                        model.setAgentMessageEditing(true)
+                                        focusedInput = .followup(item.sessionKey)
+                                    })
                                     .onSubmit { sendFollowup(item) }
                                     .disabled(sending.contains(item.sessionKey) || uncertain.contains(item.sessionKey))
                                 Button("전송") { sendFollowup(item) }.buttonStyle(.plain)
@@ -9511,6 +9533,13 @@ struct AgentView: View {
                 }
             }
         }
+        .onChange(of: focusedInput) { _, input in
+            model.setAgentMessageEditing(input != nil)
+        }
+        .onChange(of: model.agentMessageEditing) { _, editing in
+            if !editing { focusedInput = nil }
+        }
+        .onDisappear { model.setAgentMessageEditing(false) }
     }
     private func questionView(_ question: PendingAgentQuestion, for item: AgentActivity) -> some View {
         let key = AgentQuestionKey(session: item.sessionKey, question: question.id)
@@ -9539,6 +9568,11 @@ struct AgentView: View {
             if item.source == "codex" {
                 HStack(alignment: .bottom, spacing: 7) {
                     TextField(question.options.isEmpty ? "답변 입력" : "직접 답변 입력", text: Binding(get: { questionDrafts[key] ?? "" }, set: { questionDrafts[key] = $0 }))
+                        .focused($focusedInput, equals: .answer(key))
+                        .simultaneousGesture(TapGesture().onEnded {
+                            model.setAgentMessageEditing(true)
+                            focusedInput = .answer(key)
+                        })
                         .onSubmit { sendAnswer(item, question: question, answer: questionDrafts[key] ?? "") }
                         .textFieldStyle(.roundedBorder).lineLimit(1...3)
                         .disabled(answering.contains(key) || answeredOrUncertain.contains(key))
@@ -10578,6 +10612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.closeAgentSwitcher(restoreFocus: false)
             self?.model.setClipboardSearchEditing(false)
             self?.model.setWeatherCityEditing(false)
+            self?.model.setAgentMessageEditing(false)
         })
         menuTrackingObservers.append(notifications.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
@@ -11983,6 +12018,33 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     view.mouseUp(with: event(.leftMouseUp, x: 45))
     precondition(clicks == 1 && view.sessionItems.count == 1, "reused row accepted a stale mouse gesture")
     print("clipboard file drag self-test passed")
+} else if CommandLine.arguments.contains("--self-test-agent-message-focus") {
+    _ = NSApplication.shared
+    let model = Model(startServices: false)
+    model.autoHideEnabled = true
+    model.autoHideDelay = 0.08
+    var keyRequests: [Bool] = []
+    model.onNotchTextKeyChange = { keyRequests.append($0) }
+    model.select(.agents)
+    model.setAgentMessageEditing(true)
+    precondition(keyRequests.isEmpty, "a folded notch requested agent input focus")
+    model.expanded = true
+    model.setAgentMessageEditing(true)
+    model.handleHover(false)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.16))
+    precondition(model.expanded && model.agentMessageEditing && keyRequests == [true])
+    precondition(!model.beginAgentSwitcher(), "switcher took focus from agent input")
+    model.select(.home)
+    precondition(!model.agentMessageEditing && keyRequests == [true, false])
+    model.select(.agents)
+    model.setAgentMessageEditing(true)
+    model.expanded = false
+    precondition(!model.agentMessageEditing && keyRequests == [true, false, true, false])
+    model.expanded = true
+    model.setAgentMessageEditing(true)
+    model.setHoverSuspended(true)
+    precondition(!model.agentMessageEditing && keyRequests == [true, false, true, false, true, false])
+    print("agent message focus self-test passed")
 } else if CommandLine.arguments.contains("--self-test-clipboard-search-focus") {
     _ = NSApplication.shared
     let model = Model(startServices: false)
