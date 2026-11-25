@@ -233,7 +233,7 @@ impl DesktopBridge {
         }
     }
 
-    fn matches_thread(&self, session: &str, workspace: &Path) -> bool {
+    pub(crate) fn matches_thread(&self, session: &str, workspace: &Path) -> bool {
         self.ready() && self.threads.get(session).is_some_and(|known| {
             workspace.is_absolute() && fs::canonicalize(workspace).ok().is_some_and(|cwd| cwd == known.cwd)
         })

@@ -8,7 +8,7 @@
 
 `zsh build.sh`는 Rust 코어와 SwiftUI 앱, 포함된 BSD 라이선스 MediaRemote Adapter 소스를 빌드해 저장소 상위 폴더에 `Rium Notch.app`을 만듭니다. 기존 앱을 덮어쓸 때는 빌드 스크립트의 백업 보호 조건을 충족해야 합니다. 별도 위치에 빌드하려면 `RIUM_APP_DESTINATION`에 앱 번들 전체 경로를 지정하세요.
 
-앱은 기본적으로 임시 서명(ad hoc)됩니다. Apple Developer ID 서명과 공증을 받지 않았으므로, 다른 Mac에서 바로 설치할 수 있는 검증된 배포 패키지는 아직 없습니다. 서명 ID가 있는 개발자는 `RIUM_SIGNING_IDENTITY`를 설정해 빌드할 수 있지만 이 설정만으로 공증이 완료되지는 않습니다.
+앱은 기본적으로 릴리스 담당 Mac의 키체인에 보관된 자체 서명 인증서로 서명합니다. 업데이트에도 동일한 인증서의 개인키가 필요하며 개인키를 저장소, 설치 파일 또는 공유 폴더에 넣지 않습니다. 해당 키가 없는 개발자는 `RIUM_SIGNING_IDENTITY=- zsh build.sh`로 임시 서명 빌드를 만들 수 있지만, 이 빌드는 기존 자체 서명 버전과 macOS 권한을 공유하지 않습니다. 자체 서명은 Apple Developer ID 서명이나 공증이 아니므로 다른 Mac에서 바로 설치할 수 있는 검증된 배포 패키지는 아직 없습니다. 서명 ID를 `RIUM_SIGNING_IDENTITY`로 명시적으로 바꿀 수 있으며 이 설정만으로 공증이 완료되지는 않습니다.
 
 ## DMG 패키지
 

@@ -22,7 +22,9 @@ cmake --build build/mediaremote --target MediaRemoteAdapter
 bundle="$PWD/build/.rium-stage-$$"
 destination="${RIUM_APP_DESTINATION:-${PWD:h}/Rium Notch.app}"
 previous="$PWD/build/.rium-previous-$$"
-signing_identity="${RIUM_SIGNING_IDENTITY:--}"
+# Keep the same signing identity across releases so macOS can recognize updates.
+# Developers without this private key may explicitly opt into ad-hoc signing.
+signing_identity="${RIUM_SIGNING_IDENTITY:-F64A82306687C040E9D14A867AA22338B7FAA011}"
 signing_options=()
 if [[ "$signing_identity" == "Developer ID Application:"* || -n "${RIUM_NOTARY_PROFILE:-}" ]]; then
     signing_options=(--options runtime --timestamp)

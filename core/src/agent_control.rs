@@ -1,5 +1,4 @@
-//! Direct controls verify a live Codex host and thread. When there is no
-//! verified idle host, follow-ups use Codex's persistent local thread queue.
+//! Direct controls verify a live Codex host and thread before sending.
 use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File};
@@ -142,33 +141,19 @@ impl Proxy {
         }
     }
 }
-fn idle_followup_proxy(session: &str) -> Option<Proxy> {
-    let (pid, cwd) = identity(session).ok()?;
-    let socket = socket_for(pid).ok()?;
-    let mut proxy = Proxy::start(&socket).ok()?;
-    let loaded = proxy.request("thread/loaded/list", json!({})).ok()?;
-    if !loaded["data"].as_array()?.iter().any(|id| id.as_str() == Some(session)) { return None; }
-    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":false})).ok()?;
-    let thread = &read["thread"];
-    let matched_cwd = thread["cwd"].as_str().and_then(|path| fs::canonicalize(path).ok()).is_some_and(|path| path == cwd);
-    if thread["id"].as_str() != Some(session) || !matched_cwd
-        || thread.pointer("/status/type").and_then(Value::as_str) != Some("idle") { return None; }
-    proxy.request("thread/resume", json!({"threadId":session})).ok()?;
-    Some(proxy)
-}
-
-fn queue_followup(session: &str, text: &str, message_id: &str) -> Result<Value, String> {
-    let mut command = Command::new(codex_binary()?);
-    command.args(["app-server", "--listen", "stdio://"]);
-    let mut proxy = Proxy::connect(command, true)?;
-    let result = proxy.request("thread/queue/add", json!({"threadId":session, "clientUserMessageId":message_id,
-        "input":[{"type":"text","text":text,"text_elements":[]}]}));
-    let queued = result.as_ref().ok().is_some_and(|value| {
-        let item = &value["queuedSubmission"];
-        item["clientUserMessageId"].as_str() == Some(message_id)
-            && item["id"].as_str().is_some_and(|id| !id.is_empty())
-    });
-    Ok(json!({"status":if queued {"queued"} else {"unknown"}}))
+pub(crate) fn followup_turn(thread: &Value) -> Result<Option<&str>, &'static str> {
+    match thread.pointer("/status/type").and_then(Value::as_str) {
+        Some("idle") => Ok(None),
+        Some("active") => {
+            let turns = thread.get("turns").and_then(Value::as_array).ok_or("진행 중인 작업을 확인할 수 없습니다")?;
+            let mut active = turns.iter().filter(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"));
+            let id = active.next().and_then(|turn| turn.get("id")).and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 256).ok_or("진행 중인 작업을 확인할 수 없습니다")?;
+            if active.next().is_some() { return Err("진행 중인 작업을 확인할 수 없습니다"); }
+            Ok(Some(id))
+        }
+        _ => Err("현재 Codex 작업 상태를 확인할 수 없습니다"),
+    }
 }
 
 pub fn followup(session: &str, text: &str, message_id: &str) -> Result<Value, String> {
@@ -176,11 +161,30 @@ pub fn followup(session: &str, text: &str, message_id: &str) -> Result<Value, St
     if !valid_id(session) || !valid_id(message_id) || text.is_empty() || text.len() > 20_000 {
         return Err("대화 또는 메시지가 올바르지 않습니다".into());
     }
-    let Some(mut proxy) = idle_followup_proxy(session) else { return queue_followup(session, text, message_id); };
+    if let Some(result) = crate::desktop_client::followup(session, text)? { return Ok(result); }
+    let (pid, cwd) = identity(session)?;
+    let socket = socket_for(pid).map_err(|_| "Codex와 직접 연결되지 않았습니다. 입력 내용은 유지됩니다. Codex 대화에서 보내 주세요")?;
+    let mut proxy = Proxy::start(&socket)?;
+    let loaded = proxy.request("thread/loaded/list", json!({}))?;
+    if !loaded.get("data").and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session))) {
+        return Err("이 Codex 서버에서 해당 대화를 찾을 수 없습니다".into());
+    }
+    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":true}))?;
+    let thread = &read["thread"];
+    let matched_cwd = thread["cwd"].as_str().and_then(|path| fs::canonicalize(path).ok()).is_some_and(|path| path == cwd);
+    if thread["id"].as_str() != Some(session) || !matched_cwd { return Err("대화와 작업 폴더가 일치하지 않습니다".into()); }
+    let active_turn = followup_turn(thread)?.map(str::to_owned);
+    if active_turn.is_none() { proxy.request("thread/resume", json!({"threadId":session}))?; }
     // Once bytes have been sent, a timeout or disconnect is not proof of
     // failure. Return unknown and never automatically retry a message.
-    let result = proxy.request("turn/start", json!({"threadId":session,"input":[{"type":"text","text":text,"text_elements":[]}]}));
-    let accepted = result.as_ref().ok().and_then(|result| result.pointer("/turn/id")).and_then(Value::as_str).is_some_and(|id| !id.is_empty());
+    let input = json!([{"type":"text","text":text,"text_elements":[]}]);
+    let result = if let Some(ref turn) = active_turn {
+        proxy.request("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":input}))
+    } else {
+        proxy.request("turn/start", json!({"threadId":session,"input":input}))
+    };
+    let accepted = result.as_ref().ok().and_then(|result| result.get("turnId").or_else(|| result.pointer("/turn/id")))
+        .and_then(Value::as_str).is_some_and(|id| !id.is_empty() && active_turn.as_deref().is_none_or(|turn| turn == id));
     let _ = proxy.request("thread/unsubscribe", json!({"threadId":session}));
     Ok(json!({"status":if accepted {"accepted"} else {"unknown"}}))
 }
@@ -215,7 +219,7 @@ pub fn interrupt(session: &str) -> Result<Value, String> {
     Ok(json!({"status":if result.is_ok() {"accepted"} else {"unknown"}}))
 }
 
-fn encode_question_reply(question_id: &str, question: &str, answer: &str) -> String {
+pub(crate) fn encode_question_reply(question_id: &str, question: &str, answer: &str) -> String {
     let reply = json!([{"questionItemId":question_id,"question":question,"answer":answer.trim()}]);
     format!("<send_user_message_question_reply>\n{reply}\n</send_user_message_question_reply>")
 }
@@ -234,6 +238,7 @@ pub fn answer(session: &str, question_id: &str, shown_question: &str, shown_opti
         return Err("이 질문은 Codex에서 직접 답변해 주세요".into());
     };
     if call.is_empty() || call.len() > 200 || index > 2 { return Err("질문 식별자를 확인할 수 없습니다".into()); }
+    if let Some(result) = crate::desktop_client::answer(session, question_id, shown_question, shown_options, answer)? { return Ok(result); }
     let (pid, cwd) = identity(session)?;
     let socket = socket_for(pid)?;
     let mut proxy = Proxy::start(&socket)?;
@@ -309,6 +314,15 @@ pub fn answer(session: &str, question_id: &str, shown_question: &str, shown_opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followup_requires_an_unambiguous_live_turn() {
+        assert_eq!(followup_turn(&json!({"status":{"type":"idle"}})), Ok(None));
+        assert_eq!(followup_turn(&json!({"status":{"type":"active"},"turns":[{"id":"turn-1","status":"inProgress"}]})), Ok(Some("turn-1")));
+        assert!(followup_turn(&json!({"status":{"type":"active"},"turns":[]})).is_err());
+        assert!(followup_turn(&json!({"status":{"type":"active"},"turns":[{"id":"a","status":"inProgress"},{"id":"b","status":"inProgress"}]})).is_err());
+        assert!(followup_turn(&json!({"status":{"type":"unknown"}})).is_err());
+    }
 
     #[test]
     fn newest_record_wins_and_equal_timestamp_conflicts_fail_closed() {

@@ -3,6 +3,7 @@
 use crate::agent_approval::Decision;
 use crate::desktop_bridge::DesktopBridge;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -21,6 +22,17 @@ const CONTROL_LIMIT: u64 = 65_536;
 const CONTROL_RESPONSE_LIMIT: usize = 2_000_000;
 
 enum Event { Desktop(Vec<u8>), Server(Vec<u8>), DesktopEnd, ServerEnd, Failure, Control(UnixStream, Value) }
+
+struct FollowupPending {
+    stream: UnixStream,
+    session: String,
+    workspace: PathBuf,
+    text: String,
+    question_id: Option<String>,
+    expected_turn: Option<String>,
+    sent: bool,
+    deadline: Instant,
+}
 
 fn read_frames<R: Read>(source: R, tx: mpsc::SyncSender<Event>, desktop: bool) {
     let mut reader = BufReader::new(source);
@@ -117,6 +129,36 @@ fn send_control(stream: &mut UnixStream, value: &Value) {
     if let Ok(bytes) = serde_json::to_vec(value) { if bytes.len() <= CONTROL_RESPONSE_LIMIT { let _ = write_line(stream, &bytes); } }
 }
 
+fn followup_request(session: &str, workspace: &Path, thread: &Value, text: &str) -> Result<Value, &'static str> {
+    let cwd = thread.get("cwd").and_then(Value::as_str).and_then(|path| fs::canonicalize(path).ok());
+    if thread.get("id").and_then(Value::as_str) != Some(session)
+        || fs::canonicalize(workspace).ok() != cwd || cwd.is_none() {
+        return Err("대화와 작업 폴더가 일치하지 않습니다");
+    }
+    let text = text.trim();
+    if text.is_empty() || text.len() > 20_000 { return Err("메시지를 확인할 수 없습니다"); }
+    let input = json!([{"type":"text","text":text,"text_elements":[]}]);
+    match crate::agent_control::followup_turn(thread)? {
+        Some(turn) => Ok(json!({"method":"turn/steer","params":{"threadId":session,"expectedTurnId":turn,"input":input}})),
+        None => Ok(json!({"method":"turn/start","params":{"threadId":session,"input":input}})),
+    }
+}
+
+fn question_already_answered(thread: &Value, question_id: &str) -> bool {
+    thread.get("turns").and_then(Value::as_array).into_iter().flatten()
+        .flat_map(|turn| turn.get("items").and_then(Value::as_array).into_iter().flatten())
+        .flat_map(|item| match item.get("type").and_then(Value::as_str) {
+            Some("userMessage") => item.get("content").and_then(Value::as_array),
+            Some("steeringUserMessage") if item.get("status").and_then(Value::as_str) == Some("accepted") => item.get("input").and_then(Value::as_array),
+            _ => None,
+        }.into_iter().flatten())
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter_map(|text| text.trim().strip_prefix("<send_user_message_question_reply>"))
+        .filter_map(|text| text.split_once("</send_user_message_question_reply>").map(|(body, _)| body))
+        .filter_map(|body| serde_json::from_str::<Value>(body.trim()).ok())
+        .any(|replies| replies.as_array().is_some_and(|items| items.iter().any(|item| item.get("questionItemId").and_then(Value::as_str) == Some(question_id))))
+}
+
 fn control(bridge: &mut DesktopBridge, message: &Value, now: u64, output: Option<&mut std::process::ChildStdin>) -> Value {
     let action = message.get("action").and_then(Value::as_str).unwrap_or("");
     if action == "sessions" { return json!({"status":"ok","sessions":bridge.sessions()}); }
@@ -169,7 +211,16 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
     let mut desktop_out = io::stdout().lock();
     let mut failed = false;
     let mut published_revision = 0;
+    let control_prefix = format!("rium-control-{}-", random_token().ok_or("random_unavailable")?);
+    let mut control_sequence = 0u64;
+    let mut pending: HashMap<String, FollowupPending> = HashMap::new();
     while !shutdown.load(Ordering::Relaxed) {
+        let expired: Vec<String> = pending.iter().filter(|(_, request)| Instant::now() >= request.deadline).map(|(id, _)| id.clone()).collect();
+        for id in expired {
+            if let Some(mut request) = pending.remove(&id) {
+                send_control(&mut request.stream, &json!({"status":if request.sent {"unknown"} else {"unavailable"}}));
+            }
+        }
         let event = match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => event,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -188,14 +239,57 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
                     } else { failed = true; break; }
                 }
             },
+            Event::Server(line) if serde_json::from_slice::<Value>(&line).ok().and_then(|v| v.get("id").and_then(Value::as_str).map(|id| id.starts_with(&control_prefix))).unwrap_or(false) => {
+                let Ok(message) = serde_json::from_slice::<Value>(&line) else { continue; };
+                if message.get("method").is_some() { continue; }
+                let Some(id) = message.get("id").and_then(Value::as_str) else { continue; };
+                let Some(mut request) = pending.remove(id) else { continue; };
+                if request.sent {
+                    let turn = message.pointer("/result/turnId").or_else(|| message.pointer("/result/turn/id")).and_then(Value::as_str);
+                    let accepted = message.get("error").is_none() && turn.is_some_and(|id| !id.is_empty() && request.expected_turn.as_deref().is_none_or(|expected| expected == id));
+                    send_control(&mut request.stream, &json!({"status":if accepted {"accepted"} else {"unknown"}}));
+                } else {
+                    let next = message.pointer("/result/thread").filter(|thread| !request.question_id.as_deref().is_some_and(|id| question_already_answered(thread, id)))
+                        .and_then(|thread| followup_request(&request.session, &request.workspace, thread, &request.text).ok());
+                    let Some(mut next) = next.filter(|_| bridge.matches_thread(&request.session, &request.workspace)) else {
+                        send_control(&mut request.stream, &json!({"status":"unavailable"})); continue;
+                    };
+                    request.expected_turn = next.pointer("/params/expectedTurnId").and_then(Value::as_str).map(str::to_owned);
+                    control_sequence = control_sequence.wrapping_add(1);
+                    let next_id = format!("{control_prefix}{control_sequence}");
+                    next["id"] = json!(next_id);
+                    request.sent = true;
+                    let written = serde_json::to_vec(&next).ok().and_then(|bytes| engine_in.as_mut().and_then(|output| write_line(output, &bytes).ok())).is_some();
+                    if written { pending.insert(next_id, request); }
+                    else { send_control(&mut request.stream, &json!({"status":"unknown"})); }
+                }
+            }
             Event::Server(line) => match bridge.from_server(&line, now) {
                 Ok(Some(output)) => if write_line(&mut desktop_out, &output).is_err() { failed = true; break; },
                 Ok(None) => {},
                 Err(_) => { failed = true; break; }
             },
             Event::Control(mut stream, request) => {
-                let response = control(&mut bridge, &request, now, engine_in.as_mut());
-                send_control(&mut stream, &response);
+                if request.get("action").and_then(Value::as_str) == Some("followup") {
+                    let session = request.get("sessionId").and_then(Value::as_str).unwrap_or("");
+                    let workspace = Path::new(request.get("workspace").and_then(Value::as_str).unwrap_or(""));
+                    let text = request.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    let question_id = request.get("questionId").and_then(Value::as_str).filter(|id| !id.is_empty() && id.len() <= 230).map(str::to_owned);
+                    if pending.len() >= 16 || !bridge.matches_thread(session, workspace) || text.is_empty() || text.len() > 20_000 {
+                        send_control(&mut stream, &json!({"status":"unavailable"})); continue;
+                    }
+                    control_sequence = control_sequence.wrapping_add(1);
+                    let id = format!("{control_prefix}{control_sequence}");
+                    let read = json!({"id":id,"method":"thread/read","params":{"threadId":session,"includeTurns":true}});
+                    let written = serde_json::to_vec(&read).ok().and_then(|bytes| engine_in.as_mut().and_then(|output| write_line(output, &bytes).ok())).is_some();
+                    if written {
+                        pending.insert(id, FollowupPending { stream, session:session.to_owned(), workspace:workspace.to_path_buf(), text:text.to_owned(), question_id,
+                            expected_turn:None, sent:false, deadline:Instant::now()+Duration::from_secs(6) });
+                    } else { send_control(&mut stream, &json!({"status":"unavailable"})); }
+                } else {
+                    let response = control(&mut bridge, &request, now, engine_in.as_mut());
+                    send_control(&mut stream, &response);
+                }
             }
             Event::DesktopEnd => { engine_in.take(); }
             Event::ServerEnd => break,
@@ -224,6 +318,31 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followup_uses_the_owner_thread_and_never_an_ambiguous_turn() {
+        let cwd = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let active = json!({"id":"s","cwd":cwd,"status":{"type":"active"},
+            "turns":[{"id":"turn-1","status":"inProgress"}]});
+        let request = followup_request("s", &cwd, &active, "hello").unwrap();
+        assert_eq!(request["method"], "turn/steer");
+        assert_eq!(request["params"]["expectedTurnId"], "turn-1");
+        assert_eq!(request["params"]["input"][0]["text"], "hello");
+        assert!(followup_request("other", &cwd, &active, "hello").is_err());
+        let ambiguous = json!({"id":"s","cwd":cwd,"status":{"type":"active"},
+            "turns":[{"id":"a","status":"inProgress"},{"id":"b","status":"inProgress"}]});
+        assert!(followup_request("s", &cwd, &ambiguous, "hello").is_err());
+        let idle = json!({"id":"s","cwd":cwd,"status":{"type":"idle"},"turns":[]});
+        assert_eq!(followup_request("s", &cwd, &idle, "hello").unwrap()["method"], "turn/start");
+    }
+
+    #[test]
+    fn question_reply_is_not_sent_twice() {
+        let text = crate::agent_control::encode_question_reply("q", "질문", "네");
+        let thread = json!({"turns":[{"items":[{"type":"userMessage","content":[{"type":"text","text":text}]}]}]});
+        assert!(question_already_answered(&thread, "q"));
+        assert!(!question_already_answered(&thread, "other"));
+    }
 
     #[test]
     fn framing_preserves_order_and_a_final_unterminated_frame() {

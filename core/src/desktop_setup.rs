@@ -49,7 +49,7 @@ fn asar_supports_override(reader: &mut (impl Read + Seek), length: u64) -> bool 
     let Ok(header) = serde_json::from_slice::<Value>(&bytes) else { return false; };
     let Some(files) = header.pointer("/files/.vite/files/build/files").and_then(Value::as_object) else { return false; };
     const NEEDLE: &[u8] = b"CODEX_CLI_PATH";
-    for (_, file) in files.iter().filter(|(name, _)| name.starts_with("main-") && name.ends_with(".js")).take(128) {
+    for (_, file) in files.iter().filter(|(name, _)| (name.starts_with("main-") && name.ends_with(".js")) || name.as_str() == "app-server-host.js").take(128) {
         let Some(offset) = file.get("offset").and_then(Value::as_str).and_then(|offset| offset.parse::<u64>().ok()) else { continue; };
         let Some(size) = file.get("size").and_then(Value::as_u64).filter(|size| *size <= 64 * 1024 * 1024) else { continue; };
         let Some(start) = data_offset.checked_add(offset) else { continue; };
@@ -150,18 +150,24 @@ mod tests {
         assert!(!can_use_override("/other/tool", &plan.launcher_path));
     }
     #[test]
-    fn asar_scan_is_bounded_to_the_main_bundle_entry() {
-        fn archive(payload: &[u8]) -> Vec<u8> {
-            let header = json!({"files":{".vite":{"files":{"build":{"files":{"main-a.js":{"offset":"0","size":payload.len()}}}}}}});
+    fn asar_scan_is_bounded_to_the_main_and_server_host_entries() {
+        fn archive(name: &str, payload: &[u8]) -> Vec<u8> {
+            let mut files = serde_json::Map::new();
+            files.insert(name.into(), json!({"offset":"0","size":payload.len()}));
+            let header = json!({"files":{".vite":{"files":{"build":{"files":files}}}}});
             let data = serde_json::to_vec(&header).unwrap();
             let mut bytes = vec![0u8; 16];
             bytes[4..8].copy_from_slice(&((8 + data.len()) as u32).to_le_bytes());
             bytes[12..16].copy_from_slice(&(data.len() as u32).to_le_bytes());
             bytes.extend_from_slice(&data); bytes.extend_from_slice(payload); bytes
         }
-        let good = archive(b"prefix CODEX_CLI_PATH suffix");
-        let bad = archive(b"no override here");
+        let good = archive("main-a.js", b"prefix CODEX_CLI_PATH suffix");
+        let host = archive("app-server-host.js", b"prefix CODEX_CLI_PATH suffix");
+        let unrelated = archive("unrelated.js", b"prefix CODEX_CLI_PATH suffix");
+        let bad = archive("main-a.js", b"no override here");
         assert!(asar_supports_override(&mut std::io::Cursor::new(&good), good.len() as u64));
+        assert!(asar_supports_override(&mut std::io::Cursor::new(&host), host.len() as u64));
+        assert!(!asar_supports_override(&mut std::io::Cursor::new(&unrelated), unrelated.len() as u64));
         assert!(!asar_supports_override(&mut std::io::Cursor::new(&bad), bad.len() as u64));
         assert!(!asar_supports_override(&mut std::io::Cursor::new(&good[..8]), 8));
     }

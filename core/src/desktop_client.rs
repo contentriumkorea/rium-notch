@@ -58,7 +58,7 @@ fn connect(token: &str) -> Option<UnixStream> {
     let stream = UnixStream::connect(socket).ok()?;
     let (mut uid, mut gid) = (0, 0);
     if unsafe { getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != unsafe { geteuid() } { return None; }
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(8))).ok()?;
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
     Some(stream)
 }
@@ -215,6 +215,42 @@ pub fn previews(session: &str) -> Result<Value, String> {
     Ok(json!({"status":"ok","requests":requests}))
 }
 
+fn send_followup(found: Match, session: &str, text: &str, question_id: Option<&str>) -> Result<Option<Value>, String> {
+    let response = request(&found.token, json!({"action":"followup","sessionId":session,"workspace":found.workspace,"text":text,"questionId":question_id}));
+    let status = response.as_ref().and_then(|value| value.get("status")).and_then(Value::as_str).unwrap_or("unknown");
+    match status {
+        "accepted" => Ok(Some(json!({"status":"accepted"}))),
+        "unavailable" => Err("Codex 연결을 확인할 수 없습니다. 입력한 내용은 유지됩니다".into()),
+        _ => Ok(Some(json!({"status":"unknown"}))),
+    }
+}
+
+pub fn followup(session: &str, text: &str) -> Result<Option<Value>, String> {
+    let Some(found) = strict_resolve(session)? else { return Ok(None); };
+    send_followup(found, session, text, None)
+}
+
+fn question_is_pending(rows: &Value, session: &str, id: &str, question: &str, options: &Value) -> bool {
+    let Some(rows) = rows.as_array() else { return false; };
+    let mut matching = rows.iter().filter(|row| row.get("id").and_then(Value::as_str) == Some(session)
+        && row.get("source").and_then(Value::as_str) == Some("codex"));
+    let Some(row) = matching.next() else { return false; };
+    if matching.next().is_some() { return false; }
+    row.get("pendingQuestions").and_then(Value::as_array).is_some_and(|questions| questions.iter().any(|item|
+        item.get("id").and_then(Value::as_str) == Some(id)
+        && item.get("title").and_then(Value::as_str) == Some(question)
+        && item.get("options") == Some(options)))
+}
+
+pub fn answer(session: &str, question_id: &str, question: &str, options: &Value, answer: &str) -> Result<Option<Value>, String> {
+    let Some(found) = strict_resolve(session)? else { return Ok(None); };
+    if !question_is_pending(&crate::agents::recent()?, session, question_id, question, options) {
+        return Err("질문이 이미 처리됐거나 변경되었습니다. Codex에서 확인해 주세요".into());
+    }
+    let prompt = crate::agent_control::encode_question_reply(question_id, question, answer);
+    send_followup(found, session, &prompt, Some(question_id))
+}
+
 pub fn respond(session: &str, connection: &str, workspace: &str, shown: &Value, action: &str, answer: &Value) -> Result<Value, String> {
     if !matches!(action, "approval" | "question") || !shown.is_object() { return Err("응답 내용을 확인할 수 없습니다".into()); }
     let Some(found) = strict_resolve(session)? else { return Err("Desktop 연결이 종료됐습니다".into()); };
@@ -237,6 +273,14 @@ pub fn respond(session: &str, connection: &str, workspace: &str, shown: &Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn answer_requires_the_exact_still_pending_question() {
+        let rows = json!([{"source":"codex","id":"s","pendingQuestions":[{"id":"q","title":"질문","options":["네"]}]}]);
+        assert!(question_is_pending(&rows,"s","q","질문",&json!(["네"])));
+        assert!(!question_is_pending(&rows,"s","q","다른 질문",&json!(["네"])));
+        assert!(!question_is_pending(&rows,"s","q","질문",&json!(["아니오"])));
+        assert!(!question_is_pending(&rows,"s","other","질문",&json!(["네"])));
+    }
     #[test]
     fn reject_invalid_identity_without_connecting() {
         assert!(!valid_token("../socket"));
