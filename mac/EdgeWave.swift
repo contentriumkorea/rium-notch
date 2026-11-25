@@ -376,27 +376,21 @@ struct DisplayPerimeterWave: View {
                 let speed = perimeterWaveSpeed(elapsed: elapsed, offset: offset)
                 let burst = perimeterSmoothStep((speed - 0.3) / 2.5)
                 let pulse = 0.72 + 0.28 * burst
-                var glow = context
-                glow.addFilter(.blur(radius: 12))
-                var core = context
-                core.addFilter(.blur(radius: 1.5))
-                let pieces: [(Path, Double)] = (0..<20).map { index in
-                    let start = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index) / 20
-                    let end = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index + 1) / 20
-                    let position = (Double(index) + 0.5) / 20
-                    let brightness = pow(sin(.pi * pow(position, 0.72)), 1.5)
+                let pieces: [(Path, Double)] = (0..<40).map { index in
+                    let start = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index) / 40
+                    let end = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index + 1) / 40
+                    let position = (Double(index) + 0.5) / 40
+                    let brightness = pow(sin(.pi * pow(position, 0.8)), 1.5)
                     return (ribbon.trimmedPath(from: start, to: end), brightness)
                 }
-                glow.drawLayer { layer in
-                    for (segment, brightness) in pieces {
-                        layer.stroke(segment, with: .color(edgeWaveFallbackColor(tint, opacity: 0.40 * fade * pulse * brightness, style: surfaceStyle)),
-                                     style: StrokeStyle(lineWidth: 12 + 5 * burst, lineCap: .butt, lineJoin: .round))
-                    }
-                }
-                core.drawLayer { layer in
-                    for (segment, brightness) in pieces {
-                        layer.stroke(segment, with: .color(edgeWaveFallbackColor(tint, opacity: 0.85 * fade * pulse * brightness, style: surfaceStyle)),
-                                     style: StrokeStyle(lineWidth: 2.2, lineCap: .butt, lineJoin: .round))
+                for (width, blur, opacity) in [(30.0, 18.0, 0.20), (12.0, 8.0, 0.26), (3.0, 3.0, 0.30)] {
+                    var light = context
+                    light.addFilter(.blur(radius: blur))
+                    light.drawLayer { layer in
+                        for (segment, brightness) in pieces {
+                            layer.stroke(segment, with: .color(edgeWaveFallbackColor(tint, opacity: opacity * fade * pulse * brightness, style: surfaceStyle)),
+                                         style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+                        }
                     }
                 }
             }
