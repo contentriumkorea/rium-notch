@@ -156,6 +156,17 @@ pub(crate) fn followup_turn(thread: &Value) -> Result<Option<&str>, &'static str
     }
 }
 
+fn read_thread_with_recent_turns(proxy: &mut Proxy, session: &str) -> Result<Value, String> {
+    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":false}))?;
+    let mut thread = read.get("thread").cloned().filter(Value::is_object)
+        .ok_or("대화 상태를 확인할 수 없습니다")?;
+    let page = proxy.request("thread/turns/list", json!({"threadId":session,"limit":2,
+        "sortDirection":"desc","itemsView":"notLoaded"}))?;
+    let turns = page.get("data").and_then(Value::as_array).ok_or("작업 상태를 확인할 수 없습니다")?;
+    thread["turns"] = json!(turns);
+    Ok(thread)
+}
+
 pub fn followup(session: &str, text: &str, message_id: &str) -> Result<Value, String> {
     let text = text.trim();
     if !valid_id(session) || !valid_id(message_id) || text.is_empty() || text.len() > 20_000 {
@@ -169,8 +180,8 @@ pub fn followup(session: &str, text: &str, message_id: &str) -> Result<Value, St
     if !loaded.get("data").and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session))) {
         return Err("이 Codex 서버에서 해당 대화를 찾을 수 없습니다".into());
     }
-    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":true}))?;
-    let thread = &read["thread"];
+    let thread = read_thread_with_recent_turns(&mut proxy, session)?;
+    let thread = &thread;
     let matched_cwd = thread["cwd"].as_str().and_then(|path| fs::canonicalize(path).ok()).is_some_and(|path| path == cwd);
     if thread["id"].as_str() != Some(session) || !matched_cwd { return Err("대화와 작업 폴더가 일치하지 않습니다".into()); }
     let active_turn = followup_turn(thread)?.map(str::to_owned);
@@ -200,8 +211,8 @@ pub fn interrupt(session: &str) -> Result<Value, String> {
     if !loaded.get("data").and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session))) {
         return Err("이 Codex 서버에서 해당 대화를 찾을 수 없습니다".into());
     }
-    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":true}))?;
-    let thread = &read["thread"];
+    let thread = read_thread_with_recent_turns(&mut proxy, session)?;
+    let thread = &thread;
     let matched_cwd = thread.get("cwd").and_then(Value::as_str).and_then(|path| fs::canonicalize(path).ok()).is_some_and(|path| path == cwd);
     if thread.get("id").and_then(Value::as_str) != Some(session) || !matched_cwd {
         return Err("대화와 작업 폴더가 일치하지 않습니다".into());
@@ -239,76 +250,7 @@ pub fn answer(session: &str, question_id: &str, shown_question: &str, shown_opti
     };
     if call.is_empty() || call.len() > 200 || index > 2 { return Err("질문 식별자를 확인할 수 없습니다".into()); }
     if let Some(result) = crate::desktop_client::answer(session, question_id, shown_question, shown_options, answer)? { return Ok(result); }
-    let (pid, cwd) = identity(session)?;
-    let socket = socket_for(pid)?;
-    let mut proxy = Proxy::start(&socket)?;
-    let loaded = proxy.request("thread/loaded/list", json!({}))?;
-    if !loaded.get("data").and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session))) {
-        return Err("이 Codex 서버에서 해당 대화를 찾을 수 없습니다".into());
-    }
-    let read = proxy.request("thread/read", json!({"threadId":session,"includeTurns":true}))?;
-    let thread = &read["thread"];
-    let matched_cwd = thread.get("cwd").and_then(Value::as_str).and_then(|path| fs::canonicalize(path).ok()).is_some_and(|path| path == cwd);
-    if thread.get("id").and_then(Value::as_str) != Some(session) || !matched_cwd { return Err("대화와 작업 폴더가 일치하지 않습니다".into()); }
-    let turns = thread.get("turns").and_then(Value::as_array).ok_or("대기 중인 질문을 확인할 수 없습니다")?;
-    let items: Vec<&Value> = turns.iter().flat_map(|turn| turn.get("items").and_then(Value::as_array).into_iter().flatten()).collect();
-    let request = items.iter().find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage")
-        && item.get("id").and_then(Value::as_str) == Some(call)).ok_or("대기 중인 질문을 찾을 수 없습니다")?;
-    let question = request.get("questions").and_then(Value::as_array).and_then(|questions| questions.get(index as usize))
-        .ok_or("대기 중인 질문을 찾을 수 없습니다")?;
-    if question.get("isSecret").and_then(Value::as_bool) == Some(true) || question.get("is_secret").and_then(Value::as_bool) == Some(true)
-        || question.get("multiSelect").and_then(Value::as_bool) == Some(true)
-        || question.get("multi_select").and_then(Value::as_bool) == Some(true) {
-        return Err("이 질문은 Codex에서 직접 답변해 주세요".into());
-    }
-    let actual = question.get("title").and_then(Value::as_str).filter(|text| !text.trim().is_empty())
-        .or_else(|| question.get("question").and_then(Value::as_str)).ok_or("질문 내용을 확인할 수 없습니다")?;
-    if actual.trim() != shown_question { return Err("질문이 변경되었습니다. Codex에서 확인해 주세요".into()); }
-    let shown = shown_options.as_array().filter(|options| options.len() <= 20).ok_or("선택지를 확인할 수 없습니다")?;
-    let shown: Vec<&str> = shown.iter().map(Value::as_str).collect::<Option<Vec<_>>>().ok_or("선택지를 확인할 수 없습니다")?;
-    let options = question.get("options").and_then(Value::as_array);
-    let actual: Vec<&str> = match options {
-        Some(options) if options.len() <= 20 => options.iter()
-            .map(|option| option.as_str().or_else(|| option.get("label").and_then(Value::as_str)))
-            .collect::<Option<Vec<_>>>().ok_or("선택지를 확인할 수 없습니다")?,
-        Some(_) => return Err("이 질문은 Codex에서 직접 답변해 주세요".into()),
-        None => Vec::new(),
-    };
-    if shown != actual {
-        return Err("선택지가 변경되었습니다. Codex에서 확인해 주세요".into());
-    }
-    for item in &items {
-        let parts = match item.get("type").and_then(Value::as_str) {
-            Some("userMessage") => item.get("content").and_then(Value::as_array),
-            Some("steeringUserMessage") if item.get("status").and_then(Value::as_str) == Some("accepted") => item.get("input").and_then(Value::as_array),
-            _ => None,
-        };
-        for part in parts.into_iter().flatten() {
-            let Some(text) = part.get("text").and_then(Value::as_str) else { continue; };
-            let Some(text) = text.trim().strip_prefix("<send_user_message_question_reply>") else { continue; };
-            let Some((body, _)) = text.split_once("</send_user_message_question_reply>") else { continue; };
-            let Ok(value) = serde_json::from_str::<Value>(body.trim()) else { continue; };
-            if value.as_array().is_some_and(|replies| replies.iter().any(|reply| reply.get("questionItemId").and_then(Value::as_str) == Some(question_id))) {
-                return Err("이미 답변한 질문입니다".into());
-            }
-        }
-    }
-    let active = turns.iter().rev().find(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"));
-    let turn_id = active.and_then(|turn| turn.get("id")).and_then(Value::as_str);
-    if thread.pointer("/status/type").and_then(Value::as_str) != Some("idle") && turn_id.is_none() {
-        return Err("현재 Codex 작업 상태를 확인할 수 없습니다".into());
-    }
-    let prompt = encode_question_reply(question_id, shown_question, answer);
-    proxy.request("thread/resume", json!({"threadId":session}))?;
-    let response = if let Some(turn) = turn_id {
-        proxy.request("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":prompt}]}))
-    } else {
-        proxy.request("turn/start", json!({"threadId":session,"input":[{"type":"text","text":prompt}]}))
-    };
-    let accepted = response.as_ref().ok().and_then(|response| response.get("turnId").or_else(|| response.pointer("/turn/id")))
-        .and_then(Value::as_str).is_some_and(|id| !id.is_empty());
-    let _ = proxy.request("thread/unsubscribe", json!({"threadId":session}));
-    Ok(json!({"status":if accepted {"accepted"} else {"unknown"}}))
+    Err("질문 확인을 위해 Codex에서 직접 답변해 주세요".into())
 }
 
 #[cfg(test)]

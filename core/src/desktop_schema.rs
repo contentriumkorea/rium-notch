@@ -8,7 +8,8 @@ fn examples() -> Vec<(&'static str, Vec<Value>)> {
     let requests = vec![
         json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"rium_compatibility","version":"1"},"capabilities":{"experimentalApi":true}}}),
         json!({"id":1,"method":"thread/loaded/list","params":{}}),
-        json!({"id":1,"method":"thread/read","params":{"threadId":thread,"includeTurns":true}}),
+        json!({"id":1,"method":"thread/read","params":{"threadId":thread,"includeTurns":false}}),
+        json!({"id":1,"method":"thread/turns/list","params":{"threadId":thread,"limit":2,"sortDirection":"desc","itemsView":"notLoaded"}}),
         json!({"id":1,"method":"turn/start","params":{"threadId":thread,"input":[{"type":"text","text":"fixture","text_elements":[]}]}}),
         json!({"id":1,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":"turn","input":[{"type":"text","text":"fixture","text_elements":[]}]}}),
     ];

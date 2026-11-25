@@ -31,6 +31,7 @@ struct FollowupPending {
     question_id: Option<String>,
     expected_turn: Option<String>,
     sent: bool,
+    metadata: Option<Value>,
     deadline: Instant,
 }
 
@@ -144,6 +145,7 @@ fn followup_request(session: &str, workspace: &Path, thread: &Value, text: &str)
     }
 }
 
+#[cfg(test)]
 fn question_already_answered(thread: &Value, question_id: &str) -> bool {
     thread.get("turns").and_then(Value::as_array).into_iter().flatten()
         .flat_map(|turn| turn.get("items").and_then(Value::as_array).into_iter().flatten())
@@ -248,9 +250,29 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
                     let turn = message.pointer("/result/turnId").or_else(|| message.pointer("/result/turn/id")).and_then(Value::as_str);
                     let accepted = message.get("error").is_none() && turn.is_some_and(|id| !id.is_empty() && request.expected_turn.as_deref().is_none_or(|expected| expected == id));
                     send_control(&mut request.stream, &json!({"status":if accepted {"accepted"} else {"unknown"}}));
+                } else if request.metadata.is_none() {
+                    let Some(thread) = message.pointer("/result/thread").cloned() else {
+                        send_control(&mut request.stream, &json!({"status":"unavailable"})); continue;
+                    };
+                    if request.question_id.is_some() {
+                        // A metadata-only read cannot establish whether a question was already answered.
+                        send_control(&mut request.stream, &json!({"status":"unavailable"})); continue;
+                    }
+                    request.metadata = Some(thread);
+                    control_sequence = control_sequence.wrapping_add(1);
+                    let next_id = format!("{control_prefix}{control_sequence}");
+                    let list = json!({"id":next_id,"method":"thread/turns/list","params":{
+                        "threadId":request.session,"limit":2,"sortDirection":"desc","itemsView":"notLoaded"}});
+                    let written = serde_json::to_vec(&list).ok().and_then(|bytes| engine_in.as_mut().and_then(|output| write_line(output, &bytes).ok())).is_some();
+                    if written { pending.insert(next_id, request); }
+                    else { send_control(&mut request.stream, &json!({"status":"unavailable"})); }
                 } else {
-                    let next = message.pointer("/result/thread").filter(|thread| !request.question_id.as_deref().is_some_and(|id| question_already_answered(thread, id)))
-                        .and_then(|thread| followup_request(&request.session, &request.workspace, thread, &request.text).ok());
+                    let turns = message.pointer("/result/data").and_then(Value::as_array);
+                    let next = turns.and_then(|turns| {
+                        let mut thread = request.metadata.take()?;
+                        thread["turns"] = json!(turns);
+                        followup_request(&request.session, &request.workspace, &thread, &request.text).ok()
+                    });
                     let Some(mut next) = next.filter(|_| bridge.matches_thread(&request.session, &request.workspace)) else {
                         send_control(&mut request.stream, &json!({"status":"unavailable"})); continue;
                     };
@@ -280,11 +302,11 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
                     }
                     control_sequence = control_sequence.wrapping_add(1);
                     let id = format!("{control_prefix}{control_sequence}");
-                    let read = json!({"id":id,"method":"thread/read","params":{"threadId":session,"includeTurns":true}});
+                    let read = json!({"id":id,"method":"thread/read","params":{"threadId":session,"includeTurns":false}});
                     let written = serde_json::to_vec(&read).ok().and_then(|bytes| engine_in.as_mut().and_then(|output| write_line(output, &bytes).ok())).is_some();
                     if written {
                         pending.insert(id, FollowupPending { stream, session:session.to_owned(), workspace:workspace.to_path_buf(), text:text.to_owned(), question_id,
-                            expected_turn:None, sent:false, deadline:Instant::now()+Duration::from_secs(6) });
+                            expected_turn:None, sent:false, metadata:None, deadline:Instant::now()+Duration::from_secs(6) });
                     } else { send_control(&mut stream, &json!({"status":"unavailable"})); }
                 } else {
                     let response = control(&mut bridge, &request, now, engine_in.as_mut());

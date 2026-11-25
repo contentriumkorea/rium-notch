@@ -220,6 +220,7 @@ fn send_followup(found: Match, session: &str, text: &str, question_id: Option<&s
     let status = response.as_ref().and_then(|value| value.get("status")).and_then(Value::as_str).unwrap_or("unknown");
     match status {
         "accepted" => Ok(Some(json!({"status":"accepted"}))),
+        "unavailable" if question_id.is_some() => Err("질문은 Codex에서 직접 답변해 주세요. 입력한 내용은 유지됩니다".into()),
         "unavailable" => Err("Codex 연결을 확인할 수 없습니다. 입력한 내용은 유지됩니다".into()),
         _ => Ok(Some(json!({"status":"unknown"}))),
     }
