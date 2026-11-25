@@ -152,7 +152,8 @@ private struct AnimatedFullScreenEdgeWave: View {
                 Group {
                 if waveStyle == "perimeter" {
                     DisplayPerimeterWave(started: cue.started, now: now, tint: tint,
-                                         surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle))
+                                         surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle),
+                                         notchFrame: frame)
                 } else if metalIDs.contains(cue.id) {
                     EdgeWaveMetal(cue: cue, notchSize: frame.size, notchOrigin: origin, floatingRadius: island?.radius,
                                   surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle),
@@ -245,7 +246,8 @@ private struct AnimatedFullScreenEdgeWave: View {
                     // Keep simultaneous full-screen Metal surfaces bounded.
                     if usesPerimeter {
                         DisplayPerimeterWave(started: wave.started, now: now, tint: tint,
-                                             surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle))
+                                             surfaceStyle: edgeWaveSurfaceStyle(light: model.menuBarIsLight, style: surfaceStyle),
+                                             notchFrame: frame)
                     } else if metalIDs.contains(wave.id) {
                         EdgeWaveMetal(cue: EdgeWaveCue(id: wave.id, started: wave.started, inward: false, agentKind: wave.kind),
                                       notchSize: frame.size, notchOrigin: origin, floatingRadius: island?.radius,
@@ -303,13 +305,19 @@ private struct AnimatedFullScreenEdgeWave: View {
     }
 }
 
-// The reference covers approximately one perimeter in 1.24 seconds.
-let perimeterWaveLapDuration: TimeInterval = 1.24
+// Keep the light's speed constant around the full screen.
+let perimeterWaveLapDuration: TimeInterval = 0.85
 let perimeterWaveTailLength: CGFloat = 0.15
 let perimeterWaveDuration = perimeterWaveLapDuration * (1 + Double(perimeterWaveTailLength))
 
 func perimeterWaveProgress(elapsed: TimeInterval) -> Double {
     elapsed / perimeterWaveLapDuration
+}
+
+func perimeterNotchSparkle(elapsed: TimeInterval, phase: Double) -> Double {
+    guard elapsed.isFinite, elapsed >= 0, elapsed < perimeterWaveDuration else { return 0 }
+    let distance = (elapsed / perimeterWaveLapDuration - phase) / 0.09
+    return exp(-2 * distance * distance)
 }
 
 func perimeterWaveRange(elapsed: TimeInterval) -> ClosedRange<CGFloat>? {
@@ -343,6 +351,7 @@ struct DisplayPerimeterWave: View {
     let now: TimeInterval
     let tint: ScreenWaveTint
     let surfaceStyle: Float
+    var notchFrame: CGRect? = nil
 
     var body: some View {
         Canvas { context, size in
@@ -367,6 +376,20 @@ struct DisplayPerimeterWave: View {
                                          style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
                         }
                     }
+                }
+            }
+            if let frame = notchFrame, frame.width > 0, frame.height > 0 {
+                let points: [(CGFloat, Double)] = [(0.25, 0.18), (0.52, 0.40), (0.75, 0.63), (0.39, 0.84)]
+                for (position, phase) in points {
+                    let intensity = perimeterNotchSparkle(elapsed: elapsed, phase: phase) * fade
+                    guard intensity > 0.005 else { continue }
+                    let center = CGPoint(x: frame.minX + frame.width * position, y: frame.maxY + 2.5)
+                    let glowColor = edgeWaveFallbackColor(tint, opacity: 0.48 * intensity, style: surfaceStyle)
+                    let halo = Path(ellipseIn: CGRect(x: center.x - 12, y: center.y - 12, width: 24, height: 24))
+                    context.fill(halo, with: .radialGradient(Gradient(colors: [glowColor, .clear]),
+                                center: center, startRadius: 0, endRadius: 12))
+                    let core = Path(ellipseIn: CGRect(x: center.x - 3, y: center.y - 1, width: 6, height: 2))
+                    context.fill(core, with: .color(edgeWaveFallbackColor(tint, opacity: 0.75 * intensity, style: surfaceStyle)))
                 }
             }
         }

@@ -11335,7 +11335,8 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     let view = NSHostingView(rootView: ZStack {
         Color.black
         if CommandLine.arguments.contains("--self-test-render-perimeter-wave") {
-            DisplayPerimeterWave(started: 0, now: elapsed, tint: tint, surfaceStyle: 0)
+            DisplayPerimeterWave(started: 0, now: elapsed, tint: tint, surfaceStyle: 0,
+                                 notchFrame: CGRect(x: 380, y: 0, width: 240, height: 32))
         } else {
             AgentScreenWaveFallback(wave: NotchScreenWave(started: 0, kind: .agentDone),
                                     notchFrame: CGRect(x: 380, y: 0, width: 240, height: 32),
@@ -11359,6 +11360,11 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
         precondition(ScreenWaveColorMode.custom.tint(for: kind, baseRGB: baseRGB, customRGB: customRGB) == NotchLightColor.components(customRGB))
     }
     precondition(perimeterWaveRange(elapsed: -.infinity) == nil && perimeterWaveRange(elapsed: .nan) == nil)
+    precondition(perimeterWaveLapDuration < 1.24)
+    precondition(perimeterNotchSparkle(elapsed: .nan, phase: 0.4) == 0)
+    precondition(perimeterNotchSparkle(elapsed: perimeterWaveLapDuration * 0.4, phase: 0.4) > 0.99)
+    precondition(perimeterNotchSparkle(elapsed: perimeterWaveLapDuration * 0.7, phase: 0.4) < 0.001)
+    precondition(perimeterNotchSparkle(elapsed: perimeterWaveDuration, phase: 0.4) == 0)
     precondition(perimeterWaveRange(elapsed: 0) == nil && perimeterWaveRange(elapsed: perimeterWaveDuration) == nil)
     let first = perimeterWaveRange(elapsed: perimeterWaveLapDuration * 0.1)!
     let halfway = perimeterWaveRange(elapsed: perimeterWaveLapDuration * 0.5)!
