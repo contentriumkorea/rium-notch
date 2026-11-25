@@ -1579,22 +1579,18 @@ final class Model: ObservableObject {
                                active: assistantIndicator != .off || assistantFinishing || assistantListening || assistantSpeaking)
     }
     @Published private(set) var hiddenAgentSessionKeys: [AgentSessionKey] = []
-    @Published var hiddenQuestionsData = Data() {
-        didSet { layoutPreferences?.set(hiddenQuestionsData, forKey: "rium.agent.hiddenQuestions") }
+    // Reuse the previous storage key so formerly hidden questions do not
+    // reappear after upgrading. Entries are removed when their session ends.
+    @Published var skippedQuestionsData = Data() {
+        didSet { layoutPreferences?.set(skippedQuestionsData, forKey: "rium.agent.hiddenQuestions") }
     }
     private func showsExternalAgentSession(_ session: AgentSessionKey) -> Bool {
         !hiddenAgentSessionKeys.contains(session) && !isPersonalAssistantSession(session)
     }
     var externalAgentItems: [AgentActivity] {
-        let hidden = Set(hiddenAgentQuestionKeys(hiddenQuestionsData))
-        return agentItems.filter { showsExternalAgentSession($0.sessionKey) }.map { item in
-            var shown = item
-            if item.state.hasPrefix("질문 대기"), !item.pendingQuestions.isEmpty,
-               item.pendingQuestions.allSatisfy({ hidden.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id)) }) {
-                shown.state = "최근 활동"
-            }
-            return shown
-        }
+        let skipped = Set(skippedAgentQuestionKeys(skippedQuestionsData))
+        return agentItems.filter { showsExternalAgentSession($0.sessionKey) }
+            .map { agentWithoutSkippedQuestions($0, skipped: skipped) }
     }
     var visibleActiveAgentCount: Int32 {
         activeAgentSessionCount(externalAgentItems, assistant: assistantIndicator)
@@ -2464,7 +2460,7 @@ final class Model: ObservableObject {
         restoreHomeLayout()
         if let preferences = self.layoutPreferences {
             hiddenAgentSessionKeys = hiddenAgentSessions(preferences.data(forKey: "rium.agent.hiddenSessions") ?? Data())
-            hiddenQuestionsData = preferences.data(forKey: "rium.agent.hiddenQuestions") ?? Data()
+            skippedQuestionsData = preferences.data(forKey: "rium.agent.hiddenQuestions") ?? Data()
             preferredDisplayKey = NotchDisplayPreference(defaults: preferences).load()
             hoverEnabled = preferences.object(forKey: "rium.notch.hover") as? Bool ?? true
             compactStatusVisible = preferences.object(forKey: "rium.notch.compactStatusVisible") as? Bool ?? true
@@ -5011,23 +5007,28 @@ final class Model: ObservableObject {
                 let recovering = self.agentSnapshotBeforeExpiry != nil
                 let rawPrevious = self.agentSnapshotBeforeExpiry ?? self.agentItems
                 self.agentSnapshotBeforeExpiry = nil
-                let previous = self.recentAgentSnapshots.previous(rawPrevious, current: updated, at: observationTime)
-                let newQuestions = self.recentAgentQuestions.observe(updated, at: observationTime)
+                let rawSnapshots = self.recentAgentSnapshots.previous(rawPrevious, current: updated, at: observationTime)
+                let skipped = Set(skippedAgentQuestionKeys(self.skippedQuestionsData))
+                let previous = rawSnapshots.map { agentWithoutSkippedQuestions($0, skipped: skipped) }
+                let visibleUpdates = updated.map { agentWithoutSkippedQuestions($0, skipped: skipped) }
+                let newQuestions = self.recentAgentQuestions.observe(visibleUpdates, at: observationTime)
                 let initialized = self.agentObservationReady || recovering
-                let transitions = agentLightTransitions(previous: previous, current: updated, initialized: initialized, newQuestionSessions: newQuestions)
+                let transitions = agentLightTransitions(previous: previous, current: visibleUpdates, initialized: initialized, newQuestionSessions: newQuestions)
                     .filter { self.showsExternalAgentSession($0.session) && (!recovering || agentRecoveryAllows($0, previous: previous)) }
                 let arrivals = agentArrivalKinds(transitions)
                 let previousSessions = Set(previous.map(\.sessionKey))
-                let notifications = agentNotificationTransitions(previous: previous, current: updated, initialized: initialized, newQuestionSessions: newQuestions)
+                let notifications = agentNotificationTransitions(previous: previous, current: visibleUpdates, initialized: initialized, newQuestionSessions: newQuestions)
                     .filter { !self.isPersonalAssistantSession($0.0.sessionKey) && (!recovering || $0.1 == .attention || previousSessions.contains($0.0.sessionKey)) }
-                let stalled = updated.first { item in
+                let stalled = visibleUpdates.first { item in
                     self.showsExternalAgentSession(item.sessionKey) && agentEnteredStall(item, previous: previous, initialized: initialized)
                 }
                 let moodNow = ProcessInfo.processInfo.systemUptime
-                for item in updated {
+                for item in visibleUpdates {
                     _ = lumiMoodMemory.observe(item.sessionKey, mood: lumiMood(waiting: agentNeedsAttention(item.state), state: item.state), now: moodNow)
                 }
                 self.agentItems = updated; self.agentObservationReady = true
+                let pruned = pruneSkippedAgentQuestions(self.skippedQuestionsData, observed: updated)
+                if pruned != self.skippedQuestionsData { self.skippedQuestionsData = pruned }
                 if let peek = self.permissionPeek, livePermissionAgent(peek, in: updated) == nil {
                     self.clearPermissionPeek(discardPending: false)
                 }
@@ -8218,7 +8219,7 @@ private struct AgentQuestionKey: Hashable, Codable {
     let question: String
 }
 
-private func hiddenAgentQuestionKeys(_ data: Data) -> [AgentQuestionKey] {
+private func skippedAgentQuestionKeys(_ data: Data) -> [AgentQuestionKey] {
     (try? JSONDecoder().decode([AgentQuestionKey].self, from: data)) ?? []
 }
 
@@ -8226,14 +8227,34 @@ private func hiddenAgentSessions(_ data: Data) -> [AgentSessionKey] {
     (try? JSONDecoder().decode([AgentSessionKey].self, from: data)) ?? []
 }
 
-private func updateHiddenAgentQuestions(_ data: Data, hiding key: AgentQuestionKey?, restoring session: AgentSessionKey? = nil) -> Data {
-    var keys = hiddenAgentQuestionKeys(data)
-    if let session { keys.removeAll { $0.session == session } }
-    if let key {
-        keys.removeAll { $0 == key }
-        keys.append(key)
+private func skipAgentQuestion(_ data: Data, key: AgentQuestionKey) -> Data {
+    var keys = skippedAgentQuestionKeys(data)
+    guard !keys.contains(key) else { return data }
+    keys.append(key)
+    return (try? JSONEncoder().encode(keys)) ?? data
+}
+
+private func pruneSkippedAgentQuestions(_ data: Data, observed: [AgentActivity]) -> Data {
+    let finished = Set(observed.filter {
+        ["완료", "실패", "중단됨"].contains($0.state) && $0.pendingQuestions.isEmpty
+    }.map(\.sessionKey))
+    guard !finished.isEmpty else { return data }
+    let keys = skippedAgentQuestionKeys(data)
+    let remaining = keys.filter { !finished.contains($0.session) }
+    guard remaining.count != keys.count else { return data }
+    return (try? JSONEncoder().encode(remaining)) ?? data
+}
+
+private func agentWithoutSkippedQuestions(_ item: AgentActivity, skipped: Set<AgentQuestionKey>) -> AgentActivity {
+    var shown = item
+    shown.pendingQuestions = item.pendingQuestions.filter {
+        !skipped.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id))
     }
-    return (try? JSONEncoder().encode(Array(keys.suffix(256)))) ?? data
+    if !item.pendingQuestions.isEmpty && shown.pendingQuestions.isEmpty
+        && (item.state.hasPrefix("질문 대기") || item.state.hasPrefix("입력 대기")) {
+        shown.state = item.toolRunning ? "작업 중" : "최근 활동"
+    }
+    return shown
 }
 
 private struct ClaudeApproval: Identifiable {
@@ -9467,17 +9488,8 @@ struct AgentView: View {
                             set: { if $0 { liveClaudeQuestions.insert(item.sessionKey) } else { liveClaudeQuestions.remove(item.sessionKey) } }))
                         if item.source == "codex" { CodexDesktopPanel(model: model, item: item) }
                         if item.source != "claude" || !liveClaudeQuestions.contains(item.sessionKey) {
-                            let hidden = Set(hiddenAgentQuestionKeys(model.hiddenQuestionsData))
                             ForEach(item.pendingQuestions) { question in
-                                if !hidden.contains(AgentQuestionKey(session: item.sessionKey, question: question.id)) {
-                                    questionView(question, for: item)
-                                }
-                            }
-                            if item.pendingQuestions.contains(where: { hidden.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id)) }) {
-                                Button("숨긴 질문 보기") {
-                                    model.hiddenQuestionsData = updateHiddenAgentQuestions(model.hiddenQuestionsData, hiding: nil, restoring: item.sessionKey)
-                                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
-                                    .help("이 작업에서 숨긴 질문 다시 보기")
+                                questionView(question, for: item)
                             }
                         }
                         if item.source == "codex" && !agentNeedsAttention(item.state) && item.pendingQuestions.isEmpty {
@@ -9548,12 +9560,14 @@ struct AgentView: View {
                 Text(question.title).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button {
-                    model.hiddenQuestionsData = updateHiddenAgentQuestions(model.hiddenQuestionsData, hiding: key)
+                    questionDrafts.removeValue(forKey: key)
+                    questionMessages.removeValue(forKey: key)
+                    model.skippedQuestionsData = skipAgentQuestion(model.skippedQuestionsData, key: key)
                 } label: {
                     Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
                         .frame(width: 28, height: 28).contentShape(Rectangle())
                 }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help("이 질문 숨기기").accessibilityLabel("이 질문 숨기기")
+                    .help("노치에서 이 질문 건너뛰기").accessibilityLabel("노치에서 이 질문 건너뛰기")
                     .disabled(answering.contains(key))
             }
             ForEach(Array(question.options.enumerated()), id: \.offset) { _, option in
@@ -12144,12 +12158,11 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
           !pending.contains(second), drafts[first] != drafts[second] else { fatalError("agent question state crossed sessions") }
     pending.remove(first); drafts.removeValue(forKey: first)
     guard pending.isEmpty, drafts[second] == "두 번째 답변" else { fatalError("agent question cleanup crossed sessions") }
-    var hidden = updateHiddenAgentQuestions(Data(), hiding: first)
-    hidden = updateHiddenAgentQuestions(hidden, hiding: second)
-    precondition(Set(hiddenAgentQuestionKeys(hidden)) == [first, second])
-    hidden = updateHiddenAgentQuestions(hidden, hiding: nil, restoring: codex.sessionKey)
-    precondition(hiddenAgentQuestionKeys(hidden) == [second])
-    precondition(hiddenAgentQuestionKeys(Data("invalid".utf8)).isEmpty)
+    var skipped = skipAgentQuestion(Data(), key: first)
+    skipped = skipAgentQuestion(skipped, key: second)
+    skipped = skipAgentQuestion(skipped, key: first)
+    precondition(Set(skippedAgentQuestionKeys(skipped)) == [first, second])
+    precondition(skippedAgentQuestionKeys(Data("invalid".utf8)).isEmpty)
     let suite = "app.rium.notch.hidden-sessions-test.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -12174,13 +12187,36 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     restored.agentItems = [awaiting]
     let questionKey = AgentQuestionKey(session: awaiting.sessionKey, question: question.id)
     precondition(combinedAgentLightState(restored.externalAgentItems, assistant: .off).question)
-    restored.hiddenQuestionsData = updateHiddenAgentQuestions(restored.hiddenQuestionsData, hiding: questionKey)
+    restored.skippedQuestionsData = skipAgentQuestion(restored.skippedQuestionsData, key: questionKey)
     precondition(!combinedAgentLightState(restored.externalAgentItems, assistant: .off).question)
+    precondition(restored.externalAgentItems.first?.pendingQuestions.isEmpty == true)
     let reloaded = Model(startServices: false, layoutPreferences: defaults)
     reloaded.agentItems = [awaiting]
     precondition(!combinedAgentLightState(reloaded.externalAgentItems, assistant: .off).question)
-    reloaded.hiddenQuestionsData = updateHiddenAgentQuestions(reloaded.hiddenQuestionsData, hiding: nil, restoring: awaiting.sessionKey)
+    let skippedSet = Set(skippedAgentQuestionKeys(reloaded.skippedQuestionsData))
+    let filtered = agentWithoutSkippedQuestions(awaiting, skipped: skippedSet)
+    precondition(agentLightTransitions(previous: [filtered], current: [filtered], initialized: true).isEmpty)
+    let nextQuestion = PendingAgentQuestion(id: "new-question", title: "새 질문", options: [])
+    awaiting.pendingQuestions.append(nextQuestion)
+    reloaded.agentItems = [awaiting]
+    precondition(reloaded.externalAgentItems.first?.pendingQuestions.map(\.id) == ["new-question"])
     precondition(combinedAgentLightState(reloaded.externalAgentItems, assistant: .off).question)
+    awaiting.state = "승인 대기"
+    awaiting.pendingQuestions = [question]
+    reloaded.agentItems = [awaiting]
+    precondition(reloaded.externalAgentItems.first?.state == "승인 대기")
+    awaiting.state = "질문 대기"; awaiting.toolRunning = true
+    reloaded.agentItems = [awaiting]
+    precondition(reloaded.externalAgentItems.first?.state == "작업 중")
+    awaiting.state = "완료"; awaiting.pendingQuestions = []
+    let cleaned = pruneSkippedAgentQuestions(reloaded.skippedQuestionsData, observed: [awaiting])
+    precondition(skippedAgentQuestionKeys(cleaned).isEmpty)
+    precondition(pruneSkippedAgentQuestions(skipped, observed: []) == skipped)
+    var many = Data()
+    for index in 0..<300 {
+        many = skipAgentQuestion(many, key: AgentQuestionKey(session: codex.sessionKey, question: "q\(index)"))
+    }
+    precondition(skippedAgentQuestionKeys(many).count == 300, "older skipped questions must not reappear at a capacity boundary")
     print("agent question identity self-test passed")
 } else if CommandLine.arguments.contains("--self-test-interview-generation") {
     var backlog = InterviewAudioBacklog<Int>()
