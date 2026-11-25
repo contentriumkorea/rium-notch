@@ -37,17 +37,27 @@ func memoryPressureFill(_ state: String) -> Double {
     }
 }
 
-// The one-minute run-queue average is scaled against the available processors.
-func cpuPressureFill(load: Double, processors: Int) -> Double? {
-    guard load.isFinite, load >= 0, processors > 0 else { return nil }
-    let loadPerProcessor = load / Double(processors)
-    return min(1, max(0, (loadPerProcessor - 0.5) * 2))
+// macOS reports thermal state for the whole system, not just the CPU.
+func thermalPressureFill(_ state: ProcessInfo.ThermalState?) -> Double? {
+    guard let state else { return nil }
+    switch state {
+    case .nominal: return 0
+    case .fair: return 0.3
+    case .serious: return 0.65
+    case .critical: return 1
+    @unknown default: return nil
+    }
 }
 
-func currentCPUPressureFill() -> Double? {
-    var load = 0.0
-    guard getloadavg(&load, 1) == 1 else { return nil }
-    return cpuPressureFill(load: load, processors: ProcessInfo.processInfo.activeProcessorCount)
+func thermalPressureLabel(_ state: ProcessInfo.ThermalState?) -> String {
+    guard let state else { return "확인 중" }
+    switch state {
+    case .nominal: return "정상"
+    case .fair: return "약간 높음"
+    case .serious: return "높음"
+    case .critical: return "위험"
+    @unknown default: return "조회 불가"
+    }
 }
 
 private struct MonitorPressureGradient: View, Animatable {
@@ -121,7 +131,7 @@ struct CompactMonitorBadge: View {
 
     var body: some View {
         let ramPressure = showsReadings ? memoryPressureFill(model.pressure) : 0
-        let cpuPressure = showsReadings ? model.cpuPressureFill ?? 0 : 0
+        let thermalPressure = showsReadings ? thermalPressureFill(model.systemThermalState) ?? 0 : 0
         let strokeWidth = diameter * 0.085
         let dotDiameter = diameter * 0.113
         let outerMargin = diameter * 0.01
@@ -157,7 +167,7 @@ struct CompactMonitorBadge: View {
                     CTLineDraw(line, graphics)
                 }
             }
-            MonitorPressureGradient(pressure: cpuPressure)
+            MonitorPressureGradient(pressure: thermalPressure)
                 .frame(width: dotSpan, height: diameter)
                 .frame(width: diameter, height: diameter)
                 .mask {
@@ -173,7 +183,7 @@ struct CompactMonitorBadge: View {
         }
         .frame(width: diameter, height: diameter)
         .foregroundStyle(.white)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: cpuPressure)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: thermalPressure)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: ramPressure)
         .accessibilityHidden(true)
     }

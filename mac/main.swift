@@ -1620,7 +1620,7 @@ final class Model: ObservableObject {
     @Published var memory = "측정 중"
     @Published var memoryPercent = "측정 중"
     @Published var pressure = "확인 중"
-    @Published var cpuPressureFill: Double?
+    @Published var systemThermalState: ProcessInfo.ThermalState?
     @Published var swap = "확인 중"
     @Published var cpuHistory: [Double?] = []
     @Published var memoryHistory: [Double?] = []
@@ -1634,8 +1634,7 @@ final class Model: ObservableObject {
     }
     var monitorSummary: String {
         let quota = monitorCodexRemaining.map { "\($0)% 남음" } ?? "조회 불가"
-        let cpuLoad = cpuPressureFill.map { $0 == 0 ? "낮음" : ($0 < 1 ? "상승" : "높음") } ?? "조회 불가"
-        return "시스템 모니터링, CPU 부하 \(cpuLoad), 메모리 압력 \(pressure), Codex \(quota)"
+        return "시스템 모니터링, CPU 사용률 \(cpu), 시스템 발열 \(thermalPressureLabel(systemThermalState)), 메모리 압력 \(pressure), Codex \(quota)"
     }
     @Published var message = ""
     @Published var expanded = false {
@@ -5628,7 +5627,7 @@ final class Model: ObservableObject {
         memoryPercent = memoryValue.map { String(format: "%.0f%%", $0) } ?? "조회 불가"
         swap = flags & 4 == 0 ? "조회 불가" : String(format: "%.1f GB", Double(swapped) / 1_000_000_000)
         pressure = currentMemoryPressure() ?? pressureEvent ?? "조회 불가"
-        cpuPressureFill = currentCPUPressureFill()
+        systemThermalState = ProcessInfo.processInfo.thermalState
         appendMonitorSample(cpuValue, to: &cpuHistory)
         appendMonitorSample(memoryValue, to: &memoryHistory)
     }
@@ -6965,7 +6964,7 @@ struct NotchView: View {
                                     .font(.caption2).foregroundStyle(.secondary)
                             }
                         }
-                        HStack { VStack(alignment: .leading) { Text("CPU  \(model.cpu)"); Text("최근 사용률").font(.caption2).foregroundStyle(.secondary) }; Spacer(); Sparkline(samples: model.cpuHistory).stroke(Color.cyan.opacity(0.8), lineWidth: 1.5).frame(width: 100, height: 23).accessibilityHidden(true) }
+                        HStack { VStack(alignment: .leading) { Text("CPU  \(model.cpu)"); Text("시스템 발열  \(thermalPressureLabel(model.systemThermalState))").font(.caption2).foregroundStyle(.secondary) }; Spacer(); Sparkline(samples: model.cpuHistory).stroke(Color.cyan.opacity(0.8), lineWidth: 1.5).frame(width: 100, height: 23).accessibilityHidden(true) }
                         HStack { VStack(alignment: .leading) { Text("RAM  \(model.memoryPercent)"); Text(model.memory).font(.caption2).foregroundStyle(.secondary) }; Spacer(); Sparkline(samples: model.memoryHistory).stroke(Color.purple.opacity(0.9), lineWidth: 1.5).frame(width: 100, height: 23).accessibilityHidden(true) }
                         HStack { Text("메모리 압력  \(model.pressure)"); Spacer(); Text("스왑  \(model.swap)") }.font(.caption)
                         HStack { Text(model.volume); Spacer(); Text(model.brightness) }.font(.caption)
@@ -16992,11 +16991,12 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
             let used = Double(remaining).map { 100 - $0 } ?? .nan
             model.accounts[0].remaining = CodexRemainingWindow(["usedPercent": used])
         }
-        precondition(cpuPressureFill(load: 4, processors: 8) == 0)
-        precondition(cpuPressureFill(load: 6, processors: 8) == 0.5)
-        precondition(cpuPressureFill(load: 12, processors: 8) == 1)
-        precondition(cpuPressureFill(load: .nan, processors: 8) == nil)
-        model.cpuPressureFill = Double(environment["RIUM_MONITOR_CPU_PRESSURE"] ?? "0")
+        precondition(thermalPressureFill(nil) == nil)
+        precondition(thermalPressureFill(.nominal) == 0 && thermalPressureFill(.fair) == 0.3)
+        precondition(thermalPressureFill(.serious) == 0.65 && thermalPressureFill(.critical) == 1)
+        precondition(thermalPressureLabel(.nominal) == "정상" && thermalPressureLabel(.critical) == "위험")
+        let thermal = Int(environment["RIUM_MONITOR_THERMAL_STATE"] ?? "0") ?? 0
+        model.systemThermalState = ProcessInfo.ThermalState(rawValue: thermal)
         model.pressure = environment["RIUM_MONITOR_PRESSURE"] ?? "정상"
         if let phase = environment["RIUM_MONITOR_AGENT"], ["1", "preview", "completed", "waiting"].contains(phase) {
             let state = phase == "completed" ? "완료" : (phase == "waiting" ? "질문 대기" : "작업 중")
