@@ -523,7 +523,7 @@ impl AsyncQuestions {
         let kind = record.get("type").and_then(Value::as_str).unwrap_or("");
         let payload = &record["payload"];
         let subtype = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind == "event_msg" && subtype == "turn_aborted" {
+        if kind == "event_msg" && matches!(subtype, "turn_aborted" | "task_complete") {
             self.pending.clear();
             self.visible.clear();
             self.order.clear();
@@ -1372,6 +1372,20 @@ mod tests {
         questions.consume(&json!({"type":"event_msg","payload":{"type":"turn_aborted"}}));
         assert!(questions.pending.is_empty());
     }
+    #[test]
+    fn completed_turn_retires_its_unanswered_async_questions() {
+        let meta = json!({"type":"session_meta","payload":{"id":"01234567-89ab-cdef-0123-456789abcdef"}});
+        let start = json!({"type":"event_msg","payload":{"type":"task_started"}});
+        let question = json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async",
+            "call_id":"call-1","arguments":{"questions":[{"title":"계속할까요?"}]}}});
+        let complete = json!({"type":"event_msg","payload":{"type":"task_complete"}});
+        let row = activity(&meta, vec![start.clone(), question.clone(), complete, start].into_iter(), true).unwrap();
+        assert_eq!(row["state"], "작업 중");
+        assert!(row["pendingQuestions"].as_array().unwrap().is_empty());
+        let row = activity(&meta, vec![question].into_iter(), true).unwrap();
+        assert_eq!(row["state"], "질문 대기");
+    }
+
     #[test]
     fn asynchronous_questions_follow_arrival_order_and_remove_only_the_resolved_call() {
         let mut questions = AsyncQuestions::default();

@@ -369,10 +369,9 @@ struct DisplayPerimeterWave: View {
             let elapsed = now - started
             guard elapsed.isFinite, elapsed >= 0, elapsed < 2.6, size.width > 8, size.height > 8 else { return }
             let path = perimeterWavePath(size: size)
-            let reflected = path.applying(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: size.width, ty: 0))
             let fade = notchLightFadeEnvelope(elapsed: elapsed, duration: 2.6, attack: 0.15, release: 0.25)
-            for (ribbon, offset) in [(path, 0.9), (reflected, -0.9)] {
-                guard let range = perimeterWaveRange(elapsed: elapsed, offset: offset) else { continue }
+            let offset = 0.9
+            if let range = perimeterWaveRange(elapsed: elapsed, offset: offset) {
                 let speed = perimeterWaveSpeed(elapsed: elapsed, offset: offset)
                 let burst = perimeterSmoothStep((speed - 0.3) / 2.5)
                 let pulse = 0.72 + 0.28 * burst
@@ -381,7 +380,7 @@ struct DisplayPerimeterWave: View {
                     let end = range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(index + 1) / 40
                     let position = (Double(index) + 0.5) / 40
                     let brightness = pow(sin(.pi * pow(position, 0.8)), 1.5)
-                    return (ribbon.trimmedPath(from: start, to: end), brightness)
+                    return (path.trimmedPath(from: start, to: end), brightness)
                 }
                 for (width, blur, opacity) in [(30.0, 18.0, 0.20), (12.0, 8.0, 0.26), (3.0, 3.0, 0.30)] {
                     var light = context

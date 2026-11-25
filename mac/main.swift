@@ -585,7 +585,7 @@ func agentPulseCanAnimate(active: Bool, waiting: Bool, reduceMotion: Bool) -> Bo
 struct AgentActivity: Identifiable {
     let id: String
     let project: String
-    let state: String
+    var state: String
     let activity: String
     var source: String = "codex"
     var recentActivities: [String] = []
@@ -1579,10 +1579,23 @@ final class Model: ObservableObject {
                                active: assistantIndicator != .off || assistantFinishing || assistantListening || assistantSpeaking)
     }
     @Published private(set) var hiddenAgentSessionKeys: [AgentSessionKey] = []
+    @Published var hiddenQuestionsData = Data() {
+        didSet { layoutPreferences?.set(hiddenQuestionsData, forKey: "rium.agent.hiddenQuestions") }
+    }
     private func showsExternalAgentSession(_ session: AgentSessionKey) -> Bool {
         !hiddenAgentSessionKeys.contains(session) && !isPersonalAssistantSession(session)
     }
-    var externalAgentItems: [AgentActivity] { agentItems.filter { showsExternalAgentSession($0.sessionKey) } }
+    var externalAgentItems: [AgentActivity] {
+        let hidden = Set(hiddenAgentQuestionKeys(hiddenQuestionsData))
+        return agentItems.filter { showsExternalAgentSession($0.sessionKey) }.map { item in
+            var shown = item
+            if item.state.hasPrefix("질문 대기"), !item.pendingQuestions.isEmpty,
+               item.pendingQuestions.allSatisfy({ hidden.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id)) }) {
+                shown.state = "최근 활동"
+            }
+            return shown
+        }
+    }
     var visibleActiveAgentCount: Int32 {
         activeAgentSessionCount(externalAgentItems, assistant: assistantIndicator)
     }
@@ -2450,6 +2463,7 @@ final class Model: ObservableObject {
         restoreHomeLayout()
         if let preferences = self.layoutPreferences {
             hiddenAgentSessionKeys = hiddenAgentSessions(preferences.data(forKey: "rium.agent.hiddenSessions") ?? Data())
+            hiddenQuestionsData = preferences.data(forKey: "rium.agent.hiddenQuestions") ?? Data()
             preferredDisplayKey = NotchDisplayPreference(defaults: preferences).load()
             hoverEnabled = preferences.object(forKey: "rium.notch.hover") as? Bool ?? true
             compactStatusVisible = preferences.object(forKey: "rium.notch.compactStatusVisible") as? Bool ?? true
@@ -9365,7 +9379,6 @@ struct AgentView: View {
     @State private var answering: Set<AgentQuestionKey> = []
     @State private var answeredOrUncertain: Set<AgentQuestionKey> = []
     @State private var questionMessages: [AgentQuestionKey: String] = [:]
-    @AppStorage("rium.agent.hiddenQuestions") private var hiddenQuestionsData = Data()
     @State private var stopping: Set<AgentSessionKey> = []
     @State private var stopAccepted: Set<AgentSessionKey> = []
     @State private var stopUncertain: Set<AgentSessionKey> = []
@@ -9438,7 +9451,7 @@ struct AgentView: View {
                             set: { if $0 { liveClaudeQuestions.insert(item.sessionKey) } else { liveClaudeQuestions.remove(item.sessionKey) } }))
                         if item.source == "codex" { CodexDesktopPanel(model: model, item: item) }
                         if item.source != "claude" || !liveClaudeQuestions.contains(item.sessionKey) {
-                            let hidden = Set(hiddenAgentQuestionKeys(hiddenQuestionsData))
+                            let hidden = Set(hiddenAgentQuestionKeys(model.hiddenQuestionsData))
                             ForEach(item.pendingQuestions) { question in
                                 if !hidden.contains(AgentQuestionKey(session: item.sessionKey, question: question.id)) {
                                     questionView(question, for: item)
@@ -9446,12 +9459,12 @@ struct AgentView: View {
                             }
                             if item.pendingQuestions.contains(where: { hidden.contains(AgentQuestionKey(session: item.sessionKey, question: $0.id)) }) {
                                 Button("숨긴 질문 보기") {
-                                    hiddenQuestionsData = updateHiddenAgentQuestions(hiddenQuestionsData, hiding: nil, restoring: item.sessionKey)
+                                    model.hiddenQuestionsData = updateHiddenAgentQuestions(model.hiddenQuestionsData, hiding: nil, restoring: item.sessionKey)
                                 }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
                                     .help("이 작업에서 숨긴 질문 다시 보기")
                             }
                         }
-                        if item.source == "codex" && !agentNeedsAttention(item.state) {
+                        if item.source == "codex" && !agentNeedsAttention(item.state) && item.pendingQuestions.isEmpty {
                             HStack(alignment: .bottom, spacing: 7) {
                                 TextField("Codex에 후속 메시지", text: Binding(
                                     get: { drafts[item.sessionKey] ?? "" }, set: { drafts[item.sessionKey] = $0 }), axis: .vertical)
@@ -9506,7 +9519,7 @@ struct AgentView: View {
                 Text(question.title).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button {
-                    hiddenQuestionsData = updateHiddenAgentQuestions(hiddenQuestionsData, hiding: key)
+                    model.hiddenQuestionsData = updateHiddenAgentQuestions(model.hiddenQuestionsData, hiding: key)
                 } label: {
                     Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
                         .frame(width: 28, height: 28).contentShape(Rectangle())
@@ -12090,6 +12103,19 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
     restored.updateHiddenAgentSessions(hiding: nil)
     precondition(restored.visibleActiveAgentCount == 2)
     precondition(hiddenAgentSessions(Data("invalid".utf8)).isEmpty)
+    let question = PendingAgentQuestion(id: "question", title: "확인", options: [])
+    var awaiting = codex
+    awaiting.pendingQuestions = [question]
+    restored.agentItems = [awaiting]
+    let questionKey = AgentQuestionKey(session: awaiting.sessionKey, question: question.id)
+    precondition(combinedAgentLightState(restored.externalAgentItems, assistant: .off).question)
+    restored.hiddenQuestionsData = updateHiddenAgentQuestions(restored.hiddenQuestionsData, hiding: questionKey)
+    precondition(!combinedAgentLightState(restored.externalAgentItems, assistant: .off).question)
+    let reloaded = Model(startServices: false, layoutPreferences: defaults)
+    reloaded.agentItems = [awaiting]
+    precondition(!combinedAgentLightState(reloaded.externalAgentItems, assistant: .off).question)
+    reloaded.hiddenQuestionsData = updateHiddenAgentQuestions(reloaded.hiddenQuestionsData, hiding: nil, restoring: awaiting.sessionKey)
+    precondition(combinedAgentLightState(reloaded.externalAgentItems, assistant: .off).question)
     print("agent question identity self-test passed")
 } else if CommandLine.arguments.contains("--self-test-interview-generation") {
     var backlog = InterviewAudioBacklog<Int>()
