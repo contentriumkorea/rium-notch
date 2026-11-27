@@ -2478,6 +2478,14 @@ final class Model: ObservableObject {
             compactStatusVisible = preferences.object(forKey: "rium.notch.compactStatusVisible") as? Bool ?? true
         }
         teleprompter.onEditingChange = { [weak self] editing in self?.setPromptEditing(editing) }
+        tethering.onSelectCarrier = { [weak self] _ in
+            UserDefaults.standard.set("kt", forKey: "rium.carrier.active")
+            self?.ktTethering.open()
+        }
+        ktTethering.onSelectCarrier = { [weak self] _ in
+            UserDefaults.standard.set("skt", forKey: "rium.carrier.active")
+            self?.tethering.open()
+        }
         guard startServices else { return }
         tethering.startIfConnected()
         ktTethering.startIfConnected()

@@ -7,8 +7,8 @@ final class LabelEngine {
     enum State: String { case inactive, idle, settling, showing }
 
     /// 초기 실험값. 측정 결과로 조정
-    static let idleInterval: TimeInterval = 0.25
-    static let openInterval: TimeInterval = 0.08
+    static let idleInterval: TimeInterval = 0.10
+    static let openInterval: TimeInterval = 0.05
     static let noPermissionInterval: TimeInterval = 1.0
     static let stableObservationsRequired = 2
 
@@ -134,7 +134,8 @@ final class LabelEngine {
                 if newLayout { retryUntil = now.addingTimeInterval(3); bestLabelCount = 0 }
                 lastResolve = now
                 let session = currentSession
-                let outcome = resolver.resolve(snapshot, systemPIDs: reader.systemPIDs)
+                // Show the thumbnail title immediately; resolving original AX titles can take longer.
+                let outcome = resolver.resolve(snapshot, systemPIDs: reader.systemPIDs, fetchOriginalTitles: !newLayout)
                 let st = outcome.stats
                 log.info("resolved thumbnails=\(st.thumbnailCount) unique=\(st.uniqueMatches) ambiguous=\(st.ambiguousMatches) unmatched=\(st.unmatched) titleFallback=\(st.titleUniqueFallbacks) elapsedMs=\(Int(st.elapsed * 1000))")
                 renderedSnapshot = snapshot

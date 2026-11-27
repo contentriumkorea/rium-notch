@@ -110,6 +110,7 @@ struct KTSharedData: Equatable {
 }
 
 final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    var onSelectCarrier: ((String) -> Void)?
     private static let balanceURL = URL(string: "https://m.my.kt.com/s_main.jsp")!
     private static let enabledKey = "rium.kt.connected"
     private static let credentialsKey = "rium.kt.savedLogin"
@@ -163,8 +164,11 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
             let close = NSButton(title: "닫기", target: self, action: #selector(closeWindow))
             let disconnect = NSButton(title: "연결 해제", target: self, action: #selector(disconnectAccount))
             let account = NSButton(title: "저장 계정 관리…", target: self, action: #selector(editSavedAccount))
+            let carrier = NSPopUpButton(frame: .zero, pullsDown: false)
+            carrier.addItems(withTitles: ["SKT", "KT"]); carrier.selectItem(at: 1)
+            carrier.target = self; carrier.action = #selector(selectCarrier(_:)); carrier.setAccessibilityLabel("통신사 선택")
             close.bezelStyle = .rounded; disconnect.bezelStyle = .rounded; account.bezelStyle = .rounded
-            for view in [browser, close, disconnect, account] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
+            for view in [browser, close, disconnect, account, carrier] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
             NSLayoutConstraint.activate([
                 close.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
                 close.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
@@ -172,6 +176,8 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
                 disconnect.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
                 account.centerYAnchor.constraint(equalTo: close.centerYAnchor),
                 account.trailingAnchor.constraint(equalTo: disconnect.leadingAnchor, constant: -8),
+                carrier.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+                carrier.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
                 browser.topAnchor.constraint(equalTo: close.bottomAnchor, constant: 6),
                 browser.leadingAnchor.constraint(equalTo: content.leadingAnchor),
                 browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -181,6 +187,11 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
         }
         if (browser.url == nil || browser.url?.scheme == "about") && !restoringSession { refresh() }
         window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc private func selectCarrier(_ sender: NSPopUpButton) {
+        guard sender.indexOfSelectedItem == 0 else { return }
+        window?.orderOut(nil); onSelectCarrier?("skt")
+        sender.selectItem(at: 1)
     }
     @objc private func closeWindow() { window?.orderOut(nil); refreshIfDue() }
     @objc private func editSavedAccount() {
@@ -395,16 +406,6 @@ struct CarrierUsageControl: View {
     @ObservedObject var kt: KTUsageController
     @AppStorage("rium.carrier.active") private var active = "skt"
     var body: some View {
-        HStack(spacing: 0) {
-            if active == "kt" { KTUsageButton(controller: kt) } else { SKTUsageButton(controller: skt) }
-            Menu {
-                Button { active = "skt" } label: { if active == "skt" { Label("SKT", systemImage: "checkmark") } else { Text("SKT") } }
-                Button { active = "kt"; kt.open() } label: { if active == "kt" { Label("KT", systemImage: "checkmark") } else { Text("KT") } }
-            } label: {
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                    .frame(width: 20, height: 40).contentShape(Rectangle())
-            }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("통신사 선택").accessibilityLabel("통신사 선택")
-        }
+        if active == "kt" { KTUsageButton(controller: kt) } else { SKTUsageButton(controller: skt) }
     }
 }

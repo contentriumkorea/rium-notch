@@ -95,7 +95,7 @@ final class WindowResolver {
         return matcher.candidates(for: thumbnail.frame, in: candidates).isEmpty ? nil : candidates
     }
 
-    func resolve(_ thumbnails: [Thumbnail], systemPIDs: Set<pid_t>) -> Outcome {
+    func resolve(_ thumbnails: [Thumbnail], systemPIDs: Set<pid_t>, fetchOriginalTitles: Bool = true) -> Outcome {
         let start = Date()
         var stats = ResolveStats()
         stats.thumbnailCount = thumbnails.count
@@ -113,21 +113,30 @@ final class WindowResolver {
             switch result {
             case .unique(let w):
                 stats.uniqueMatches += 1
-                let (title, resolved) = originalTitle(for: t.title, pid: w.ownerPID)
+                let (title, resolved) = fetchOriginalTitles ? originalTitle(for: t.title, pid: w.ownerPID) : (t.title, false)
                 if resolved { stats.originalTitleResolved += 1 }
                 label = ResolvedLabel(frame: t.frame, appName: appName(for: w.ownerPID), bundleID: bundleID(for: w.ownerPID), ownerPID: w.ownerPID, title: title, confidence: .geometry)
             case .ambiguous:
                 stats.ambiguousMatches += 1
-                label = fallbackByTitle(t, windows: candidates, stats: &stats)
+                label = fetchOriginalTitles ? fallbackByTitle(t, windows: candidates, stats: &stats) : quickFallback(t, windows: candidates)
             case .none:
                 stats.unmatched += 1
-                label = fallbackByTitle(t, windows: candidates, stats: &stats)
+                label = fetchOriginalTitles ? fallbackByTitle(t, windows: candidates, stats: &stats) : quickFallback(t, windows: candidates)
             }
             labels.append(label)
             detail.append((t, result, label))
         }
         stats.elapsed = Date().timeIntervalSince(start)
         return Outcome(labels: labels, stats: stats, detail: detail.map { ($0.0, $0.1, $0.2) })
+    }
+
+    private func quickFallback(_ t: Thumbnail, windows: [WindowRecord]) -> ResolvedLabel {
+        let owners = Set(windows.map(\.ownerPID))
+        let pid = owners.count == 1 ? owners.first : nil
+        let title = t.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ResolvedLabel(frame: t.frame, appName: pid.flatMap { appName(for: $0) },
+                             bundleID: pid.flatMap { bundleID(for: $0) }, ownerPID: pid,
+                             title: title.isEmpty ? nil : title, confidence: .thumbnailOnly)
     }
 
     /// 앱 확정 후, 해당 앱의 AX 창 제목 중 유일하게 대응하는 원래 제목 탐색

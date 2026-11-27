@@ -43,6 +43,12 @@ final class OverlayController {
     }
 
     private var windows: [OverlayWindow] = []
+    private struct VisibleLabel {
+        let label: ResolvedLabel
+        let screenIndex: Int
+        let view: LabelView
+    }
+    private var visibleLabels: [VisibleLabel] = []
     private var geometry = DisplayGeometry(primaryHeight: 0, screenFrames: [])
     private let sessions: SessionCounter
     private let iconProvider = AppIconProvider()
@@ -73,12 +79,16 @@ final class OverlayController {
     func show(_ labels: [ResolvedLabel], session: SessionToken) {
         guard sessions.isCurrent(session) else { return }
         refreshGeometry()
-        if showAppIcon { iconProvider.invalidateSessionCaches() }
-        for w in windows { w.contentView?.subviews.forEach { $0.removeFromSuperview() } }
+        if !isShowing && showAppIcon { iconProvider.invalidateSessionCaches() }
+        var nextLabels: [VisibleLabel] = []
 
         for label in labels {
             let thumbAppKit = geometry.appKitRect(fromTopLeft: label.frame)
             guard let idx = geometry.screenIndex(forAppKitRect: thumbAppKit), idx < windows.count else { continue }
+            if let existing = visibleLabels.first(where: { $0.label == label && $0.screenIndex == idx }) {
+                nextLabels.append(existing)
+                continue
+            }
             let window = windows[idx]
             let local = geometry.localRect(thumbAppKit, inScreen: geometry.screenFrames[idx])
             let maxWidth = max(24, local.width - Self.inset * 2)
@@ -89,8 +99,16 @@ final class OverlayController {
             size.height = min(size.height, max(0, local.height - Self.inset * 2))
             let origin = anchor.origin(labelSize: size, in: local, inset: Self.inset)
             view.frame = NSRect(origin: origin, size: size)
+            view.alphaValue = 0
             window.contentView?.addSubview(view)
+            nextLabels.append(VisibleLabel(label: label, screenIndex: idx, view: view))
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 1.0
+                view.animator().alphaValue = 1
+            }
         }
+        for previous in visibleLabels where !nextLabels.contains(where: { $0.view === previous.view }) { previous.view.removeFromSuperview() }
+        visibleLabels = nextLabels
         for w in windows { w.orderFrontRegardless() }
         isShowing = true
     }
@@ -100,6 +118,7 @@ final class OverlayController {
             w.contentView?.subviews.forEach { $0.removeFromSuperview() }
             w.orderOut(nil)
         }
+        visibleLabels.removeAll()
         isShowing = false
     }
 

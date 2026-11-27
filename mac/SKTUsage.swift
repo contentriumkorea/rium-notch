@@ -167,6 +167,7 @@ struct SKTSharedData: Equatable {
 }
 
 final class SKTUsageController: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    var onSelectCarrier: ((String) -> Void)?
     private static let balanceURL = URL(string: "https://www.tworld.co.kr/web/myt-data/balance")!
     private static let enabledKey = "rium.skt.connected"
     private static let credentialsKey = "rium.skt.savedLogin"
@@ -235,9 +236,13 @@ final class SKTUsageController: NSObject, ObservableObject, WKNavigationDelegate
             let disconnect = NSButton(title: "연결 해제", target: self, action: #selector(disconnectAccount))
             close.bezelStyle = .rounded
             let account = NSButton(title: "자동 로그인 설정…", target: self, action: #selector(editSavedAccount))
+            let carrier = NSPopUpButton(frame: .zero, pullsDown: false)
+            carrier.addItems(withTitles: ["SKT", "KT"]); carrier.selectItem(at: 0)
+            carrier.target = self; carrier.action = #selector(selectCarrier(_:)); carrier.setAccessibilityLabel("통신사 선택")
             disconnect.bezelStyle = .rounded
             account.bezelStyle = .rounded
             account.translatesAutoresizingMaskIntoConstraints = false
+            carrier.translatesAutoresizingMaskIntoConstraints = false
             browser.translatesAutoresizingMaskIntoConstraints = false
             close.translatesAutoresizingMaskIntoConstraints = false
             disconnect.translatesAutoresizingMaskIntoConstraints = false
@@ -245,6 +250,7 @@ final class SKTUsageController: NSObject, ObservableObject, WKNavigationDelegate
             content.addSubview(close)
             content.addSubview(disconnect)
             content.addSubview(account)
+            content.addSubview(carrier)
             NSLayoutConstraint.activate([
                 close.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
                 close.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
@@ -252,6 +258,8 @@ final class SKTUsageController: NSObject, ObservableObject, WKNavigationDelegate
                 disconnect.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
                 account.centerYAnchor.constraint(equalTo: close.centerYAnchor),
                 account.trailingAnchor.constraint(equalTo: disconnect.leadingAnchor, constant: -8),
+                carrier.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+                carrier.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
                 browser.topAnchor.constraint(equalTo: close.bottomAnchor, constant: 6),
                 browser.leadingAnchor.constraint(equalTo: content.leadingAnchor),
                 browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -264,6 +272,12 @@ final class SKTUsageController: NSObject, ObservableObject, WKNavigationDelegate
         if (browser.url == nil || browser.url?.scheme == "about") && !restoringSession { refresh() }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func selectCarrier(_ sender: NSPopUpButton) {
+        guard sender.indexOfSelectedItem == 1 else { return }
+        window?.orderOut(nil); onSelectCarrier?("kt")
+        sender.selectItem(at: 0)
     }
 
     @objc private func closeWindow() {
