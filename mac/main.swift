@@ -1278,6 +1278,17 @@ func notchContainsInteractivePoint(_ point: NSPoint, screen: NSRect, expanded: B
     return expanded || notchContainsScreenPoint(point, screen: screen, expanded: false, section: section,
                                                 size: targetSize, corners: targetCorners)
 }
+
+// Keep click and drag hit testing on the whole silhouette. Only hover-to-open
+// uses the top half of the ordinary compact notch, not taller preview cards.
+func notchHoverContainsPoint(_ point: NSPoint, screen: NSRect, interactive: Bool, expanded: Bool,
+                             floating: Bool, compactHeight: CGFloat) -> Bool {
+    guard interactive else { return false }
+    if expanded || floating { return true }
+    guard point.y.isFinite, screen.maxY.isFinite, compactHeight.isFinite, compactHeight > 0 else { return false }
+    let depth = screen.maxY - point.y
+    return depth >= 0 && depth <= compactHeight / 2
+}
 enum ShelfDropZone: Equatable { case shelf, airDrop }
 func shelfDropResolutionCurrent(generation: Int, current: Int, finished: Bool) -> Bool {
     !finished && generation == current
@@ -2576,7 +2587,7 @@ final class Model: ObservableObject {
     func setHoverEnabled(_ enabled: Bool) {
         hoverEnabled = enabled; layoutPreferences?.set(enabled, forKey: "rium.notch.hover")
         hoverWork?.cancel(); hoverWork = nil
-        let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? !enabled
+        let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? !enabled
         if hoverSettingNeedsReconciliation(enabled: enabled, expanded: expanded, autoHide: autoHideEnabled, inside: inside) {
             handleHover(inside)
         }
@@ -2810,7 +2821,7 @@ final class Model: ObservableObject {
         autoHideEnabled = enabled; UserDefaults.standard.set(enabled, forKey: "rium.notch.autoHide")
         if !enabled && expanded { hoverWork?.cancel(); hoverWork = nil }
         else if expanded {
-            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
+            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true
             handleHover(inside)
         }
     }
@@ -2819,7 +2830,7 @@ final class Model: ObservableObject {
         autoHideDelay = min(3, max(0.1, delay))
         UserDefaults.standard.set(autoHideDelay, forKey: "rium.notch.autoHideDelay")
         if expanded && autoHideEnabled {
-            let inside = pointerInside ?? ((NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true)
+            let inside = pointerInside ?? ((NSApp?.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true)
             handleHover(inside)
         }
     }
@@ -3200,7 +3211,7 @@ final class Model: ObservableObject {
         let task = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.hoverWork = nil
-            let pointer = (NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation)
+            let pointer = (NSApp?.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation)
             let locked = self.hoverSuspended || self.fileDragActive || self.hoverExpansionBlocked ||
                          self.menuTrackingDepth != 0 || self.hoverEditingBlocksCollapse
             guard hoverTransitionAllowed(inside: inside, expanded: self.expanded, hoverEnabled: self.hoverEnabled,
@@ -3253,7 +3264,7 @@ final class Model: ObservableObject {
         } else {
             shelfDropZone = nil
             if expanded {
-                let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? false
+                let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? false
                 handleHover(inside)
             }
             presentDeferredScreenshotIfPossible()
@@ -3419,7 +3430,7 @@ final class Model: ObservableObject {
         guard wasEditing else { return }
         hoverWork?.cancel(); hoverWork = nil
         // Reconcile with the regular close delay as soon as editing finishes.
-        let inside = pointerInside ?? ((NSApp.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true)
+        let inside = pointerInside ?? ((NSApp.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true)
         handleHover(inside)
     }
     private func saveTabOrder() {
@@ -3474,7 +3485,7 @@ final class Model: ObservableObject {
         if !editing {
             notes.finishEditing()
             if expanded {
-                let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
+                let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true
                 handleHover(inside)
             }
         }
@@ -3487,7 +3498,7 @@ final class Model: ObservableObject {
         hoverWork?.cancel(); hoverWork = nil
         onNotchTextKeyChange?(editing)
         if !editing && expanded {
-            let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
+            let inside = (NSApp?.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true
             handleHover(inside)
         }
     }
@@ -3514,7 +3525,7 @@ final class Model: ObservableObject {
         assistantEditing = active
         hoverWork?.cancel(); hoverWork = nil
         if !active {
-            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
+            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true
             handleHover(inside)
         }
     }
@@ -3525,7 +3536,7 @@ final class Model: ObservableObject {
         promptEditing = active
         hoverWork?.cancel(); hoverWork = nil
         if !active {
-            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideNotch(NSEvent.mouseLocation) ?? true
+            let inside = (NSApp.delegate as? AppDelegate)?.pointIsInsideHoverArea(NSEvent.mouseLocation) ?? true
             handleHover(inside)
         }
     }
@@ -10630,7 +10641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
         menuTrackingObservers.append(notifications.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
-            self.model.endMenuTracking(pointerInside: self.pointIsInsideNotch(NSEvent.mouseLocation))
+            self.model.endMenuTracking(pointerInside: self.pointIsInsideHoverArea(NSEvent.mouseLocation))
         })
         if initialScreen != nil, showsNotchOnLaunch {
             panel.orderFrontRegardless()
@@ -10831,6 +10842,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                              renderedSize: model.renderedNotchOutlineSize, renderedCorners: model.renderedNotchCorners,
                                              targetSize: model.currentNotchOutlineSize, targetCorners: model.currentNotchCorners)
     }
+    func pointIsInsideHoverArea(_ point: NSPoint, screen selectedScreen: NSScreen? = nil, interactive: Bool? = nil) -> Bool {
+        let inside = interactive ?? pointIsInsideNotch(point, screen: selectedScreen)
+        if model.floatingIslandPlacement != nil { return inside }
+        guard let screen = (selectedScreen ?? targetScreen())?.frame else { return false }
+        let compact = calculateCollapsedNotchSize(cameraWidth: model.cameraExclusion, cameraHeight: model.cameraHeight,
+                                                  screenWidth: screen.width, agent: false, timer: false, music: false)
+        return notchHoverContainsPoint(point, screen: screen, interactive: inside, expanded: model.expanded,
+                                       floating: false, compactHeight: compact.height)
+    }
     private func pointIsInsideTargetNotch(_ point: NSPoint, screen selectedScreen: NSScreen? = nil) -> Bool {
         if let island = model.floatingIslandGeometry { return island.contains(screenPoint: point) }
         guard let screen = (selectedScreen ?? targetScreen())?.frame else { return false }
@@ -10868,6 +10888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let point = NSEvent.mouseLocation
         let inside = pointIsInsideNotch(point, screen: selectedScreen)
+        let hoverInside = pointIsInsideHoverArea(point, screen: selectedScreen, interactive: inside)
         let buttons = NSEvent.pressedMouseButtons
         let buttonDown = buttons != 0
         let ignoring = panel.ignoresMouseEvents || preparingDropEntry
@@ -10884,14 +10905,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ignoring: ignoring, buttonDown: buttonDown, notifyHover: notifyHover, preparingDrop: preparingDropEntry)
         // Even if an earlier silent reflow updated mouseInsideNotch, preserve an
         // active drag until mouse-up before delivering an outside transition.
-        let deferHoverExit = buttonDown && !ignoring && !inside
-        let deferHoverEntry = buttonDown && inside && !model.expanded
-        let expansionBlocked = decision.inside && model.hoverExpansionBlocked
-        if inside && expansionBlocked { hoverDeferredForPreview = true; lastDeliveredHover = false }
-        if !inside { hoverDeferredForPreview = false }
-        let deferPreview = hoverPreviewDefersEntry(inside: decision.inside, blocked: expansionBlocked,
+        let deferHoverExit = buttonDown && !ignoring && !hoverInside
+        let deferHoverEntry = buttonDown && hoverInside && !model.expanded
+        let expansionBlocked = hoverInside && model.hoverExpansionBlocked
+        if hoverInside && expansionBlocked { hoverDeferredForPreview = true; lastDeliveredHover = false }
+        if !hoverInside { hoverDeferredForPreview = false }
+        let deferPreview = hoverPreviewDefersEntry(inside: hoverInside, blocked: expansionBlocked,
             wasDeferred: hoverDeferredForPreview, targetInside: pointIsInsideTargetNotch(point, screen: selectedScreen))
-        if let hover = pendingNotchHoverChange(inside: decision.inside, lastDelivered: lastDeliveredHover, notifyHover: notifyHover && !deferHoverExit && !deferHoverEntry && !deferPreview) {
+        if let hover = pendingNotchHoverChange(inside: hoverInside, lastDelivered: lastDeliveredHover, notifyHover: notifyHover && !deferHoverExit && !deferHoverEntry && !deferPreview) {
             lastDeliveredHover = hover
             if hover { hoverDeferredForPreview = false }
             model.handleHover(hover)
@@ -10903,7 +10924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private func reconcileHoverAfterSession() {
         guard panel != nil, !screenAccessBlocked, !displaySleeping else { return }
-        lastDeliveredHover = !pointIsInsideNotch(NSEvent.mouseLocation)
+        lastDeliveredHover = !pointIsInsideHoverArea(NSEvent.mouseLocation)
         updateMouseInterception()
     }
     private func handlePointerEvent(_ event: NSEvent) {
@@ -10998,7 +11019,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agentSwitcherTookActivation = false
         agentSwitcherPreviousKeyWindow = nil
-        if model.expanded { model.handleHover(pointIsInsideNotch(NSEvent.mouseLocation)) }
+        if model.expanded { model.handleHover(pointIsInsideHoverArea(NSEvent.mouseLocation)) }
     }
 
     fileprivate func openSwitcherAgent(_ item: AgentActivity) {
@@ -13252,6 +13273,23 @@ if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || Comman
         precondition(!notchContainsScreenPoint(CGPoint(x: screen.minX + 1, y: top.y), screen: screen, expanded: expanded, section: .home))
         precondition(!notchContainsScreenPoint(CGPoint(x: top.x, y: top.y + 1), screen: screen, expanded: expanded, section: .home))
     }
+    let compactHeight: CGFloat = 32
+    let hoverTop = NSPoint(x: screen.midX, y: screen.maxY - 8)
+    let hoverMiddle = NSPoint(x: screen.midX, y: screen.maxY - 16)
+    let hoverBottom = NSPoint(x: screen.midX, y: screen.maxY - 24)
+    precondition(notchContainsScreenPoint(hoverBottom, screen: screen, expanded: false, section: .home), "lower half must still accept normal notch interaction")
+    precondition(notchHoverContainsPoint(hoverTop, screen: screen, interactive: true, expanded: false, floating: false, compactHeight: compactHeight))
+    precondition(notchHoverContainsPoint(hoverMiddle, screen: screen, interactive: true, expanded: false, floating: false, compactHeight: compactHeight))
+    precondition(!notchHoverContainsPoint(hoverBottom, screen: screen, interactive: true, expanded: false, floating: false, compactHeight: compactHeight))
+    precondition(notchHoverContainsPoint(hoverBottom, screen: screen, interactive: true, expanded: true, floating: false, compactHeight: compactHeight))
+    precondition(notchHoverContainsPoint(hoverBottom, screen: screen, interactive: true, expanded: false, floating: true, compactHeight: compactHeight))
+    precondition(!notchHoverContainsPoint(hoverTop, screen: screen, interactive: false, expanded: false, floating: false, compactHeight: compactHeight))
+    let offsetScreen = NSRect(x: -1512, y: 300, width: 1512, height: 982)
+    let offsetPoint = NSPoint(x: offsetScreen.midX, y: offsetScreen.maxY - 20)
+    precondition(!notchHoverContainsPoint(offsetPoint, screen: offsetScreen, interactive: true, expanded: false, floating: false, compactHeight: compactHeight))
+    precondition(!notchHoverContainsPoint(hoverTop, screen: screen, interactive: true, expanded: false, floating: false, compactHeight: .nan))
+    precondition(!hoverTransitionAllowed(inside: true, expanded: false, hoverEnabled: true, autoHide: true,
+                                         interactionLocked: false, pointerInside: notchHoverContainsPoint(hoverBottom, screen: screen, interactive: true, expanded: false, floating: false, compactHeight: compactHeight)), "delayed hover reopened after the pointer left the upper half")
     precondition(!notchContainsScreenPoint(NSPoint(x: 100, y: 832), screen: screen, expanded: false, section: .home))
     let shoulderPoint = NSPoint(x: screen.midX - 17.7, y: screen.maxY - 37.5)
     precondition(notchContainsScreenPoint(shoulderPoint, screen: screen, expanded: false, section: .home,
