@@ -26,6 +26,9 @@ final class LabelEngine {
     private var previousSnapshot: [Thumbnail] = []
     private var stableCount = 0
     private var renderedSnapshot: [Thumbnail]?
+    private var retryUntil = Date.distantPast
+    private var lastResolve = Date.distantPast
+    private var bestLabelCount = 0
     private var wasOpen = false
     private var currentSession: SessionToken
 
@@ -74,6 +77,9 @@ final class LabelEngine {
         if wasOpen || renderedSnapshot != nil {
             wasOpen = false
             renderedSnapshot = nil
+            retryUntil = .distantPast
+            lastResolve = .distantPast
+            bestLabelCount = 0
             previousSnapshot = []
             stableCount = 0
             sessions.advance()
@@ -121,16 +127,24 @@ final class LabelEngine {
         previousSnapshot = snapshot
 
         if stable && stableCount >= Self.stableObservationsRequired {
-            if renderedSnapshot == nil || !LayoutStability.isStable(renderedSnapshot!, snapshot) {
+            let now = Date()
+            let newLayout = renderedSnapshot == nil || !LayoutStability.isStable(renderedSnapshot!, snapshot)
+            let shouldRetry = now < retryUntil && now.timeIntervalSince(lastResolve) >= 0.5
+            if newLayout || shouldRetry {
+                if newLayout { retryUntil = now.addingTimeInterval(3); bestLabelCount = 0 }
+                lastResolve = now
                 let session = currentSession
                 let outcome = resolver.resolve(snapshot, systemPIDs: reader.systemPIDs)
                 let st = outcome.stats
                 log.info("resolved thumbnails=\(st.thumbnailCount) unique=\(st.uniqueMatches) ambiguous=\(st.ambiguousMatches) unmatched=\(st.unmatched) titleFallback=\(st.titleUniqueFallbacks) elapsedMs=\(Int(st.elapsed * 1000))")
                 renderedSnapshot = snapshot
-                let labels = outcome.labels
-                DispatchQueue.main.async {
-                    self.overlay.show(labels, session: session)
-                    self.state = .showing
+                if outcome.labels.count >= bestLabelCount {
+                    bestLabelCount = outcome.labels.count
+                    let labels = outcome.labels
+                    DispatchQueue.main.async {
+                        self.overlay.show(labels, session: session)
+                        self.state = .showing
+                    }
                 }
                 if diagnostics.isArmed {
                     diagnostics.disarm()
@@ -142,6 +156,8 @@ final class LabelEngine {
         } else if renderedSnapshot != nil {
             // 배치 변경(Space 이동, 창 재배치). 즉시 숨기고 재안정까지 대기
             renderedSnapshot = nil
+            retryUntil = .distantPast
+            bestLabelCount = 0
             DispatchQueue.main.async { self.overlay.hide() }
             setState(.settling)
         } else {

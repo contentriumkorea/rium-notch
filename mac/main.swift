@@ -1556,6 +1556,7 @@ func menuBarSurfaceIsLight(_ appearance: NSAppearance?) -> Bool {
 
 final class Model: ObservableObject {
     let tethering = SKTUsageController()
+    let ktTethering = KTUsageController()
     let assistant: AssistantController
     private let assistantSpeech = AssistantSpeech()
     private var assistantSpeechChunks: [String: AssistantSpeechChunks] = [:]
@@ -2479,6 +2480,7 @@ final class Model: ObservableObject {
         teleprompter.onEditingChange = { [weak self] editing in self?.setPromptEditing(editing) }
         guard startServices else { return }
         tethering.startIfConnected()
+        ktTethering.startIfConnected()
         agenda.onAdded = { [weak self] addition in
             switch addition {
             case .event: self?.showAgendaLight(.calendarAdded)
@@ -7073,7 +7075,7 @@ struct NotchView: View {
                 GeometryReader { geometry in
                     let bounds = geometry[anchor]
                     HStack(spacing: 0) {
-                        SKTUsageButton(controller: model.tethering)
+                        CarrierUsageControl(skt: model.tethering, kt: model.ktTethering)
                             .frame(width: Self.tetheringButtonWidth, height: 52)
                         Button { model.select(.monitor) } label: {
                             CompactMonitorBadge(model: model, diameter: 26, showsReadings: model.usageTrackingEnabled)
@@ -11527,6 +11529,14 @@ if CommandLine.arguments.contains("--self-test-mission-control-labels") {
     precondition(model.notchScreenWaves.count == 2 && model.notchScreenWaves.first?.id == event.id)
     precondition(model.notchScreenWaves.last?.previewStyle == "perimeter")
     print("perimeter wave self-test passed")
+} else if CommandLine.arguments.contains("--self-test-kt-usage") {
+    precondition(KTSharedData.parse(["remaining": "12.34 GB", "allowance": "50.00 GB"]) == KTSharedData(remaining: "12.34 GB", used: nil, allowance: "50.00 GB"))
+    precondition(KTSharedData.parse(["remaining": "기본제공"])?.remaining == "기본제공")
+    precondition(KTSharedData.parse(["remaining": "로그인 필요"]) == nil)
+    precondition(KTSharedData.parse(["remaining": ""]) == nil)
+    precondition(KTSessionStore.belongsToKT(".m.my.kt.com"))
+    precondition(!KTSessionStore.belongsToKT("kt.com.example.org"))
+    print("KT usage self-test passed")
 } else if CommandLine.arguments.contains("--self-test-skt-usage") {
     let row = ["통합공유 데이터 80GB", "50.52GB", "29.48GB", "-"]
     precondition(SKTSharedData.parse(rows: [row]) == SKTSharedData(remaining: "29.48GB", used: "50.52GB", allowance: "80GB"))
