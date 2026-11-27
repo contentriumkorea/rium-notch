@@ -76,18 +76,39 @@ final class WindowResolver {
         var detail: [(thumbnail: Thumbnail, result: GeometryMatcher.Result, label: ResolvedLabel)]
     }
 
-    func resolve(_ thumbnails: [Thumbnail], dockPID: pid_t?) -> Outcome {
+    /// WindowManager also exposes thumbnails from inactive Spaces. Its identifier
+    /// contains the owning bundle ID and a numeric Space identifier.
+    static func windowManagerBundleID(_ identifier: String?) -> String? {
+        guard let identifier, let separator = identifier.range(of: ".space.", options: .backwards) else { return nil }
+        let bundle = String(identifier[..<separator.lowerBound])
+        let space = identifier[separator.upperBound...]
+        guard !bundle.isEmpty, !space.isEmpty, space.allSatisfy({ $0.isNumber }) else { return nil }
+        return bundle
+    }
+
+    static func visibleCandidates(for thumbnail: Thumbnail, windows: [WindowRecord], matcher: GeometryMatcher,
+                                  bundleID: (pid_t) -> String?) -> [WindowRecord]? {
+        guard let owner = windowManagerBundleID(thumbnail.identifier) else { return windows }
+        let candidates = windows.filter { bundleID($0.ownerPID) == owner }
+        // WindowManager also reports off-Space thumbnails which can overlap
+        // visible windows. Suppress them unless their owner and geometry match.
+        return matcher.candidates(for: thumbnail.frame, in: candidates).isEmpty ? nil : candidates
+    }
+
+    func resolve(_ thumbnails: [Thumbnail], systemPIDs: Set<pid_t>) -> Outcome {
         let start = Date()
         var stats = ResolveStats()
         stats.thumbnailCount = thumbnails.count
-        let windows = collectWindows(extraExcluded: dockPID.map { [$0] } ?? [])
+        let windows = collectWindows(extraExcluded: systemPIDs)
         stats.candidateWindowCount = windows.count
 
         var labels: [ResolvedLabel] = []
         var detail: [(Thumbnail, GeometryMatcher.Result, ResolvedLabel)] = []
 
         for t in thumbnails {
-            let result = matcher.match(t.frame, in: windows)
+            guard let candidates = Self.visibleCandidates(for: t, windows: windows, matcher: matcher,
+                                                           bundleID: { self.bundleID(for: $0) }) else { continue }
+            let result = matcher.match(t.frame, in: candidates)
             var label: ResolvedLabel
             switch result {
             case .unique(let w):
@@ -97,10 +118,10 @@ final class WindowResolver {
                 label = ResolvedLabel(frame: t.frame, appName: appName(for: w.ownerPID), bundleID: bundleID(for: w.ownerPID), ownerPID: w.ownerPID, title: title, confidence: .geometry)
             case .ambiguous:
                 stats.ambiguousMatches += 1
-                label = fallbackByTitle(t, windows: windows, stats: &stats)
+                label = fallbackByTitle(t, windows: candidates, stats: &stats)
             case .none:
                 stats.unmatched += 1
-                label = fallbackByTitle(t, windows: windows, stats: &stats)
+                label = fallbackByTitle(t, windows: candidates, stats: &stats)
             }
             labels.append(label)
             detail.append((t, result, label))

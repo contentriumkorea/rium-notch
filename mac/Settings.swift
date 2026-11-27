@@ -96,6 +96,46 @@ private struct SettingsSwitchStyle: ToggleStyle {
     }
 }
 
+struct MissionControlPositionPicker: View {
+    @Binding var selection: String
+    private let options: [(id: String, title: String, symbol: String)] = [
+        ("topLeft", "왼쪽 위", "arrow.up.left"), ("topCenter", "가운데 위", "arrow.up"), ("topRight", "오른쪽 위", "arrow.up.right"),
+        ("middleLeft", "왼쪽 가운데", "arrow.left"), ("center", "중앙", "circle.fill"), ("middleRight", "오른쪽 가운데", "arrow.right"),
+        ("bottomLeft", "왼쪽 아래", "arrow.down.left"), ("bottomCenter", "가운데 아래", "arrow.down"), ("bottomRight", "오른쪽 아래", "arrow.down.right")
+    ]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("라벨 위치")
+                Text("창 안에서 표시할 위치를 선택하세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(38), spacing: 4), count: 3), spacing: 4) {
+                ForEach(0..<options.count, id: \.self) { index in
+                    let option = options[index]
+                    let selected = selection == option.id
+                    Button { selection = option.id } label: {
+                        Image(systemName: option.symbol)
+                            .font(.system(size: option.id == "center" ? 8 : 14, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.65))
+                            .background(selected ? Color.accentColor : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(selected ? 0.25 : 0.08), lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(option.title)
+                    .accessibilityLabel("라벨 위치: \(option.title)")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            .frame(width: 122)
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: Model
     @ObservedObject private var updater: UpdateController
@@ -365,13 +405,7 @@ struct SettingsView: View {
                 Text("Mission Control에서 각 창에 이름표를 표시합니다. 손쉬운 사용 권한이 필요합니다.")
                     .font(.caption).foregroundStyle(.secondary)
                 if missionControlLabelsEnabled {
-                    Picker("라벨 위치", selection: $missionControlLabelAnchor) {
-                        Text("중앙").tag("center")
-                        Text("왼쪽 위").tag("topLeft")
-                        Text("오른쪽 위").tag("topRight")
-                        Text("왼쪽 아래").tag("bottomLeft")
-                        Text("오른쪽 아래").tag("bottomRight")
-                    }
+                    MissionControlPositionPicker(selection: $missionControlLabelAnchor)
                     Picker("표시 순서", selection: $missionControlLabelOrder) {
                         Text("창 제목 / 앱 이름").tag("titleFirst")
                         Text("앱 이름 / 창 제목").tag("appFirst")

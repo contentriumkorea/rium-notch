@@ -99,7 +99,8 @@ final class LabelEngine {
             return
         }
 
-        guard let group = reader.missionControlGroup() else {
+        let groups = reader.missionControlGroups()
+        guard let group = groups.first else {
             if wasOpen { log.debug("mission control closed") }
             endSessionIfOpen()
             setState(.idle)
@@ -114,7 +115,7 @@ final class LabelEngine {
             log.debug("mission control opened")
         }
 
-        let snapshot = reader.thumbnails(in: group)
+        let snapshot = reader.thumbnails(in: groups)
         let stable = LayoutStability.isStable(previousSnapshot, snapshot)
         stableCount = stable ? stableCount + 1 : 1
         previousSnapshot = snapshot
@@ -122,7 +123,7 @@ final class LabelEngine {
         if stable && stableCount >= Self.stableObservationsRequired {
             if renderedSnapshot == nil || !LayoutStability.isStable(renderedSnapshot!, snapshot) {
                 let session = currentSession
-                let outcome = resolver.resolve(snapshot, dockPID: reader.currentDockPID)
+                let outcome = resolver.resolve(snapshot, systemPIDs: reader.systemPIDs)
                 let st = outcome.stats
                 log.info("resolved thumbnails=\(st.thumbnailCount) unique=\(st.uniqueMatches) ambiguous=\(st.ambiguousMatches) unmatched=\(st.unmatched) titleFallback=\(st.titleUniqueFallbacks) elapsedMs=\(Int(st.elapsed * 1000))")
                 renderedSnapshot = snapshot

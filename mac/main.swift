@@ -11411,10 +11411,50 @@ if CommandLine.arguments.contains("--self-test-mission-control-labels") {
     precondition(MissionControlLabelsIntegration.shouldRun(enabled: true, standaloneRunning: false))
     precondition(!MissionControlLabelsIntegration.shouldRun(enabled: true, standaloneRunning: true))
     precondition(!MissionControlLabelsIntegration.shouldRun(enabled: false, standaloneRunning: false))
+    precondition(WindowResolver.windowManagerBundleID("com.example.app.space.42") == "com.example.app")
+    precondition(WindowResolver.windowManagerBundleID("mc.spaces.list") == nil)
+    precondition(WindowResolver.windowManagerBundleID("com.example.app.space.bad") == nil)
+    precondition(MissionControlReader.isDisplayGroup(role: "AXGroup", identifier: "mc.display"))
+    precondition(MissionControlReader.isDisplayGroup(role: "AXGroup", identifier: "mc.display.2"))
+    precondition(!MissionControlReader.isDisplayGroup(role: "AXGroup", identifier: "mc.spaces"))
+    let frame = CGRect(x: 10, y: 20, width: 300, height: 200)
+    let windows = [WindowRecord(windowID: 1, ownerPID: 1, frame: frame, layer: 0)]
+    let thumbnail = Thumbnail(title: "", frame: frame, identifier: "com.visible.app.space.1")
+    precondition(WindowResolver.visibleCandidates(for: thumbnail, windows: windows, matcher: GeometryMatcher(), bundleID: { _ in "com.visible.app" })?.count == 1)
+    precondition(WindowResolver.visibleCandidates(for: thumbnail, windows: windows, matcher: GeometryMatcher(), bundleID: { _ in "com.other.app" }) == nil)
+    let offscreen = Thumbnail(title: "", frame: frame.offsetBy(dx: 50, dy: 0), identifier: "com.visible.app.space.2")
+    precondition(WindowResolver.visibleCandidates(for: offscreen, windows: windows, matcher: GeometryMatcher(), bundleID: { _ in "com.visible.app" }) == nil)
+    let anchorFrame = CGRect(x: 100, y: 200, width: 400, height: 300)
+    let anchorSize = CGSize(width: 120, height: 50)
+    let expectedAnchors: [(LabelAnchor, CGPoint)] = [
+        (.topLeft, CGPoint(x: 108, y: 442)), (.topCenter, CGPoint(x: 240, y: 442)), (.topRight, CGPoint(x: 372, y: 442)),
+        (.middleLeft, CGPoint(x: 108, y: 325)), (.center, CGPoint(x: 240, y: 325)), (.middleRight, CGPoint(x: 372, y: 325)),
+        (.bottomLeft, CGPoint(x: 108, y: 208)), (.bottomCenter, CGPoint(x: 240, y: 208)), (.bottomRight, CGPoint(x: 372, y: 208))
+    ]
+    precondition(LabelAnchor.allCases.count == 9)
+    for (anchor, expected) in expectedAnchors {
+        precondition(anchor.origin(labelSize: anchorSize, in: anchorFrame, inset: 8) == expected)
+        precondition(anchorFrame.contains(CGRect(origin: expected, size: anchorSize)))
+    }
     let sessions = SessionCounter(), old = SessionToken(0)
     sessions.advance()
     precondition(!sessions.isCurrent(old))
     print("mission control label integration self-test passed")
+} else if CommandLine.arguments.contains("--self-test-render-label-position") {
+    guard let output = ProcessInfo.processInfo.environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
+    _ = NSApplication.shared
+    let view = NSHostingView(rootView: MissionControlPositionPicker(selection: .constant("topCenter"))
+        .padding(20).frame(width: 520, height: 170)
+        .background(Color(red: 0.125, green: 0.14, blue: 0.17))
+        .preferredColorScheme(.dark))
+    view.frame = NSRect(x: 0, y: 0, width: 520, height: 170)
+    let window = NSWindow(contentRect: view.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = view; view.layoutSubtreeIfNeeded()
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { fatalError("position picker render unavailable") }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let data = rep.representation(using: .png, properties: [:]) else { fatalError("position picker render failed") }
+    try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+    print("mission control label position render self-test passed")
 } else if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || CommandLine.arguments.contains("--self-test-render-outward-wave") {
     let environment = ProcessInfo.processInfo.environment
     guard let output = environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }

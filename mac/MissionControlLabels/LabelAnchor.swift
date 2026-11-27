@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 public enum LabelAnchor: String, CaseIterable, Sendable {
-    case center, topLeft, topRight, bottomLeft, bottomRight
+    case center, topLeft, topCenter, topRight, middleLeft, middleRight, bottomLeft, bottomCenter, bottomRight
 
     public static let `default`: LabelAnchor = .center
 
@@ -10,8 +10,12 @@ public enum LabelAnchor: String, CaseIterable, Sendable {
         switch self {
         case .center: return "Center"
         case .topLeft: return "Top Left"
+        case .topCenter: return "Top Center"
         case .topRight: return "Top Right"
+        case .middleLeft: return "Middle Left"
+        case .middleRight: return "Middle Right"
         case .bottomLeft: return "Bottom Left"
+        case .bottomCenter: return "Bottom Center"
         case .bottomRight: return "Bottom Right"
         }
     }
@@ -23,9 +27,9 @@ public enum LabelAnchor: String, CaseIterable, Sendable {
 
     public var textAlignment: TextAlignment {
         switch self {
-        case .center: return .center
-        case .topLeft, .bottomLeft: return .left
-        case .topRight, .bottomRight: return .right
+        case .center, .topCenter, .bottomCenter: return .center
+        case .topLeft, .middleLeft, .bottomLeft: return .left
+        case .topRight, .middleRight, .bottomRight: return .right
         }
     }
 
@@ -33,20 +37,19 @@ public enum LabelAnchor: String, CaseIterable, Sendable {
     public func origin(labelSize size: CGSize, in thumb: CGRect, inset: CGFloat) -> CGPoint {
         let x: CGFloat, y: CGFloat
         switch self {
-        case .center:
+        case .center, .topCenter, .bottomCenter:
             x = thumb.midX - size.width / 2
+        case .topLeft, .middleLeft, .bottomLeft:
+            x = thumb.minX + inset
+        case .topRight, .middleRight, .bottomRight:
+            x = thumb.maxX - inset - size.width
+        }
+        switch self {
+        case .topLeft, .topCenter, .topRight:
+            y = thumb.maxY - inset - size.height
+        case .middleLeft, .center, .middleRight:
             y = thumb.midY - size.height / 2
-        case .topLeft:
-            x = thumb.minX + inset
-            y = thumb.maxY - inset - size.height
-        case .topRight:
-            x = thumb.maxX - inset - size.width
-            y = thumb.maxY - inset - size.height
-        case .bottomLeft:
-            x = thumb.minX + inset
-            y = thumb.minY + inset
-        case .bottomRight:
-            x = thumb.maxX - inset - size.width
+        case .bottomLeft, .bottomCenter, .bottomRight:
             y = thumb.minY + inset
         }
         return CGPoint(x: round(x), y: round(y))
