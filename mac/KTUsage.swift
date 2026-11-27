@@ -165,11 +165,12 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
             let close = NSButton(title: "닫기", target: self, action: #selector(closeWindow))
             let disconnect = NSButton(title: "연결 해제", target: self, action: #selector(disconnectAccount))
             let account = NSButton(title: "저장 계정 관리…", target: self, action: #selector(editSavedAccount))
+            let retry = NSButton(title: "자동 로그인 다시 시도", target: self, action: #selector(retryAutoLogin))
             let carrier = NSPopUpButton(frame: .zero, pullsDown: false)
             carrier.addItems(withTitles: ["SKT", "KT"]); carrier.selectItem(at: 1)
             carrier.target = self; carrier.action = #selector(selectCarrier(_:)); carrier.setAccessibilityLabel("통신사 선택")
             close.bezelStyle = .rounded; disconnect.bezelStyle = .rounded; account.bezelStyle = .rounded
-            for view in [browser, close, disconnect, account, carrier] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
+            for view in [browser, close, disconnect, account, carrier, retry] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
             NSLayoutConstraint.activate([
                 close.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
                 close.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
@@ -179,6 +180,8 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
                 account.trailingAnchor.constraint(equalTo: disconnect.leadingAnchor, constant: -8),
                 carrier.centerYAnchor.constraint(equalTo: close.centerYAnchor),
                 carrier.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+                retry.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+                retry.trailingAnchor.constraint(equalTo: account.leadingAnchor, constant: -8),
                 browser.topAnchor.constraint(equalTo: close.bottomAnchor, constant: 6),
                 browser.leadingAnchor.constraint(equalTo: content.leadingAnchor),
                 browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -195,6 +198,11 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
         sender.selectItem(at: 1)
     }
     @objc private func closeWindow() { window?.orderOut(nil); refreshIfDue() }
+    @objc private func retryAutoLogin() {
+        guard hasSavedAccount else { accountMessage("먼저 저장 계정 관리에서 KT 계정을 저장해 주세요."); return }
+        UserDefaults.standard.removeObject(forKey: Self.retryBlockedKey)
+        refresh()
+    }
     @objc private func editSavedAccount() {
         guard let window, window.attachedSheet == nil else { return }
         let alert = NSAlert(); alert.messageText = "KT 저장 계정 관리"
@@ -378,20 +386,31 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
                 self.status = "KT 자동 로그인 중"
                 let script = """
                 if (window !== window.top || location.origin !== 'https://accounts.kt.com' || location.pathname !== '/login/id') return 'manual';
-                const id = document.querySelector('input#id[name=id][type=text]');
-                const secret = document.querySelector('input#password[name=password][type=password]');
-                const submit = document.querySelector('button[type=submit][aria-label="로그인"]');
-                if (!id || !secret || !submit || id.disabled || secret.disabled || secret.value || (id.value && id.value !== loginID)) return 'manual';
+                let id = document.querySelector('input#id[name=id][type=text]');
+                let secret = document.querySelector('input#password[name=password][type=password]');
+                if (!id || !secret || id.disabled || secret.disabled || secret.value || (id.value && id.value !== loginID)) return 'manual';
                 const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                for (const [input, value] of [[id, loginID], [secret, password]]) {
-                    set.call(input, value); input.dispatchEvent(new Event('input', {bubbles: true})); input.dispatchEvent(new Event('change', {bubbles: true}));
-                }
-                await new Promise(resolve => setTimeout(resolve, 300));
-                if (location.origin !== 'https://accounts.kt.com' || location.pathname !== '/login/id' || submit.disabled || id.value !== loginID || secret.value !== password) return 'manual';
+                const update = (input, value) => {
+                    set.call(input, value);
+                    input.dispatchEvent(new Event('input', {bubbles: true}));
+                    input.dispatchEvent(new Event('change', {bubbles: true}));
+                    input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+                };
+                update(id, loginID);
+                await new Promise(resolve => setTimeout(resolve, 150));
+                id = document.querySelector('input#id[name=id][type=text]');
+                secret = document.querySelector('input#password[name=password][type=password]');
+                if (!id || id.value !== loginID || !secret || secret.disabled || secret.value) return 'manual';
+                update(secret, password);
+                await new Promise(resolve => setTimeout(resolve, 400));
+                id = document.querySelector('input#id[name=id][type=text]');
+                secret = document.querySelector('input#password[name=password][type=password]');
+                const submit = document.querySelector('button[type=submit][aria-label="로그인"]');
+                if (location.origin !== 'https://accounts.kt.com' || location.pathname !== '/login/id' || !id || !secret || !submit || submit.disabled || id.value !== loginID || secret.value !== password) return 'manual';
                 submit.click(); return 'submitted';
                 """
                 webView.callAsyncJavaScript(script, arguments: ["loginID": credentials.loginID, "password": credentials.password], in: nil,
-                    in: WKContentWorld.world(name: "app.rium.notch.kt-login")) { [weak self] result in
+                    in: .page) { [weak self] result in
                     guard let self, self.generation == current else { return }
                     if case .success(let value) = result, value as? String == "submitted" { return }
                     self.status = "KT 로그인 확인 필요"; self.autoLoginPending = false

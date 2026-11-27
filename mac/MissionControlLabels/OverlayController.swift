@@ -103,7 +103,7 @@ final class OverlayController {
             window.contentView?.addSubview(view)
             nextLabels.append(VisibleLabel(label: label, screenIndex: idx, view: view))
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 1.0
+                context.duration = 0.5
                 view.animator().alphaValue = 1
             }
         }
