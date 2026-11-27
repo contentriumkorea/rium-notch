@@ -98,10 +98,10 @@ private struct SettingsSwitchStyle: ToggleStyle {
 
 struct MissionControlPositionPicker: View {
     @Binding var selection: String
-    private let options: [(id: String, title: String, symbol: String)] = [
-        ("topLeft", "왼쪽 위", "arrow.up.left"), ("topCenter", "가운데 위", "arrow.up"), ("topRight", "오른쪽 위", "arrow.up.right"),
-        ("middleLeft", "왼쪽 가운데", "arrow.left"), ("center", "중앙", "circle.fill"), ("middleRight", "오른쪽 가운데", "arrow.right"),
-        ("bottomLeft", "왼쪽 아래", "arrow.down.left"), ("bottomCenter", "가운데 아래", "arrow.down"), ("bottomRight", "오른쪽 아래", "arrow.down.right")
+    private let options: [(id: String, title: String, alignment: Alignment)] = [
+        ("topLeft", "왼쪽 위", .topLeading), ("topCenter", "가운데 위", .top), ("topRight", "오른쪽 위", .topTrailing),
+        ("middleLeft", "왼쪽 가운데", .leading), ("center", "중앙", .center), ("middleRight", "오른쪽 가운데", .trailing),
+        ("bottomLeft", "왼쪽 아래", .bottomLeading), ("bottomCenter", "가운데 아래", .bottom), ("bottomRight", "오른쪽 아래", .bottomTrailing)
     ]
 
     var body: some View {
@@ -117,10 +117,14 @@ struct MissionControlPositionPicker: View {
                     let option = options[index]
                     let selected = selection == option.id
                     Button { selection = option.id } label: {
-                        Image(systemName: option.symbol)
-                            .font(.system(size: option.id == "center" ? 8 : 14, weight: .semibold))
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(.white.opacity(selected ? 0.8 : 0.5), lineWidth: 1)
+                            .frame(width: 24, height: 19)
+                            .overlay(alignment: option.alignment) {
+                                Capsule().fill(.white.opacity(selected ? 1 : 0.8))
+                                    .frame(width: 8, height: 3).padding(3)
+                            }
                             .frame(width: 38, height: 38)
-                            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.65))
                             .background(selected ? Color.accentColor : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(selected ? 0.25 : 0.08), lineWidth: 1))
                             .contentShape(Rectangle())
