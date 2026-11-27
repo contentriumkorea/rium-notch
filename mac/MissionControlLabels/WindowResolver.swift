@@ -95,7 +95,7 @@ final class WindowResolver {
         return matcher.candidates(for: thumbnail.frame, in: candidates).isEmpty ? nil : candidates
     }
 
-    func resolve(_ thumbnails: [Thumbnail], systemPIDs: Set<pid_t>, fetchOriginalTitles: Bool = true) -> Outcome {
+    func resolve(_ thumbnails: [Thumbnail], systemPIDs: Set<pid_t>, fetchOriginalTitles: Bool = true, trackMotion: Bool = false) -> Outcome {
         let start = Date()
         var stats = ResolveStats()
         stats.thumbnailCount = thumbnails.count
@@ -105,21 +105,34 @@ final class WindowResolver {
         var labels: [ResolvedLabel] = []
         var detail: [(Thumbnail, GeometryMatcher.Result, ResolvedLabel)] = []
 
+        var usedWindows = Set<UInt32>()
         for t in thumbnails {
-            guard let candidates = Self.visibleCandidates(for: t, windows: windows, matcher: matcher,
+            let candidates: [WindowRecord]
+            if trackMotion, let owner = Self.windowManagerBundleID(t.identifier) {
+                candidates = windows.filter { self.bundleID(for: $0.ownerPID) == owner && !usedWindows.contains($0.windowID) }
+            } else {
+                guard let visible = Self.visibleCandidates(for: t, windows: windows, matcher: matcher,
                                                            bundleID: { self.bundleID(for: $0) }) else { continue }
-            let result = matcher.match(t.frame, in: candidates)
+                candidates = visible
+            }
+            var result = matcher.match(t.frame, in: candidates)
+            if trackMotion, case .none = result, let candidate = Self.movingCandidate(for: t.frame, in: candidates) {
+                result = .unique(candidate)
+            }
             var label: ResolvedLabel
             switch result {
             case .unique(let w):
+                usedWindows.insert(w.windowID)
                 stats.uniqueMatches += 1
                 let (title, resolved) = fetchOriginalTitles ? originalTitle(for: t.title, pid: w.ownerPID) : (t.title, false)
                 if resolved { stats.originalTitleResolved += 1 }
-                label = ResolvedLabel(frame: t.frame, appName: appName(for: w.ownerPID), bundleID: bundleID(for: w.ownerPID), ownerPID: w.ownerPID, title: title, confidence: .geometry)
+                label = ResolvedLabel(frame: trackMotion ? w.frame : t.frame, appName: appName(for: w.ownerPID), bundleID: bundleID(for: w.ownerPID), ownerPID: w.ownerPID, title: title, confidence: .geometry)
             case .ambiguous:
+                if trackMotion { continue }
                 stats.ambiguousMatches += 1
                 label = fetchOriginalTitles ? fallbackByTitle(t, windows: candidates, stats: &stats) : quickFallback(t, windows: candidates)
             case .none:
+                if trackMotion { continue }
                 stats.unmatched += 1
                 label = fetchOriginalTitles ? fallbackByTitle(t, windows: candidates, stats: &stats) : quickFallback(t, windows: candidates)
             }
@@ -128,6 +141,22 @@ final class WindowResolver {
         }
         stats.elapsed = Date().timeIntervalSince(start)
         return Outcome(labels: labels, stats: stats, detail: detail.map { ($0.0, $0.1, $0.2) })
+    }
+
+    /// Match an animating window to its final thumbnail. Ambiguous pairs wait
+    /// for the next frame instead of putting a title on the wrong window.
+    static func movingCandidate(for target: CGRect, in windows: [WindowRecord]) -> WindowRecord? {
+        guard target.width > 0, target.height > 0 else { return nil }
+        let scored = windows.compactMap { window -> (WindowRecord, CGFloat)? in
+            let frame = window.frame
+            guard frame.width > 0, frame.height > 0 else { return nil }
+            let ratioError = abs(log((frame.width / frame.height) / (target.width / target.height)))
+            guard ratioError < 0.25 else { return nil }
+            let distance = hypot(frame.midX - target.midX, frame.midY - target.midY)
+            return (window, distance + ratioError * 500)
+        }.sorted { $0.1 < $1.1 }
+        guard let first = scored.first, scored.count == 1 || scored[1].1 - first.1 > 35 else { return nil }
+        return first.0
     }
 
     private func quickFallback(_ t: Thumbnail, windows: [WindowRecord]) -> ResolvedLabel {

@@ -85,12 +85,17 @@ final class OverlayController {
         for label in labels {
             let thumbAppKit = geometry.appKitRect(fromTopLeft: label.frame)
             guard let idx = geometry.screenIndex(forAppKitRect: thumbAppKit), idx < windows.count else { continue }
-            if let existing = visibleLabels.first(where: { $0.label == label && $0.screenIndex == idx }) {
-                nextLabels.append(existing)
-                continue
-            }
             let window = windows[idx]
             let local = geometry.localRect(thumbAppKit, inScreen: geometry.screenFrames[idx])
+            if let existing = visibleLabels.first(where: { candidate in
+                candidate.screenIndex == idx && candidate.label.ownerPID == label.ownerPID && candidate.label.bundleID == label.bundleID
+                    && candidate.label.title == label.title && !nextLabels.contains(where: { $0.view === candidate.view })
+            }) {
+                let size = existing.view.frame.size
+                existing.view.setFrameOrigin(anchor.origin(labelSize: size, in: local, inset: Self.inset))
+                nextLabels.append(VisibleLabel(label: label, screenIndex: idx, view: existing.view))
+                continue
+            }
             let maxWidth = max(24, local.width - Self.inset * 2)
             let lineLimit = LabelLayoutPolicy.titleLineLimit(forThumbnailHeight: local.height)
             let icon = (showAppIcon ? label.ownerPID.flatMap(iconProvider.icon(for:)) : nil)

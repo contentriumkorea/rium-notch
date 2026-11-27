@@ -68,9 +68,10 @@ final class MissionControlReader {
     }
 
     /// 그룹 아래의 창 썸네일. 상단 Spaces 막대(mc.spaces*) 하위 트리 제외
-    func thumbnails(in groups: [AXUIElement]) -> [Thumbnail] {
+    func thumbnails(in groups: [AXUIElement], activeSpaces: Set<UInt64>? = nil) -> [Thumbnail] {
         var out: [Thumbnail] = []
         for group in groups { collect(group, depth: 0, into: &out) }
+        out.removeAll { !ActiveSpaces.includes($0.identifier, active: activeSpaces) }
         // 연속 관측 비교 안정화를 위해 왼쪽 위부터 읽는 순서로 정렬
         out.sort { a, b in
             if abs(a.frame.minY - b.frame.minY) > 2 { return a.frame.minY < b.frame.minY }

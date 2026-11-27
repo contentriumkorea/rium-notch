@@ -15,6 +15,9 @@ final class LabelEngine {
     private let log = Logger(subsystem: "com.markhan.MissionControlLabels", category: "engine")
     private let queue = DispatchQueue(label: "com.markhan.MissionControlLabels.collector", qos: .userInitiated)
     private let reader = MissionControlReader()
+    private let activeSpaces = ActiveSpaces()
+    private var previousSpaces: Set<UInt64>?
+    private var trackingUntil = Date.distantPast
     private let resolver: WindowResolver
     private let sessions: SessionCounter
     private let overlay: OverlayController
@@ -82,6 +85,8 @@ final class LabelEngine {
             bestLabelCount = 0
             previousSnapshot = []
             stableCount = 0
+            previousSpaces = nil
+            trackingUntil = .distantPast
             sessions.advance()
             resolver.invalidateSessionCaches()
             DispatchQueue.main.async { self.overlay.hide() }
@@ -118,10 +123,44 @@ final class LabelEngine {
             wasOpen = true
             currentSession = sessions.advance()
             resolver.invalidateSessionCaches()
+            trackingUntil = Date().addingTimeInterval(1.0)
             log.debug("mission control opened")
         }
 
-        let snapshot = reader.thumbnails(in: groups)
+        let currentSpaces = activeSpaces.current()
+        if previousSpaces != currentSpaces {
+            previousSpaces = currentSpaces
+            currentSession = sessions.advance()
+            renderedSnapshot = nil
+            previousSnapshot = []
+            stableCount = 0
+            bestLabelCount = 0
+            trackingUntil = Date().addingTimeInterval(1.0)
+            resolver.invalidateSessionCaches()
+            let session = currentSession
+            DispatchQueue.main.async { if self.sessions.isCurrent(session) { self.overlay.hide() } }
+        }
+        let snapshot = reader.thumbnails(in: groups, activeSpaces: currentSpaces)
+        if snapshot.isEmpty {
+            renderedSnapshot = nil
+            previousSnapshot = []
+            bestLabelCount = 0
+            let session = currentSession
+            DispatchQueue.main.async { if self.sessions.isCurrent(session) { self.overlay.hide() } }
+            setState(.settling)
+            schedule(after: Self.openInterval, generation: generation)
+            return
+        }
+        if currentSpaces != nil && Date() < trackingUntil {
+            let outcome = resolver.resolve(snapshot, systemPIDs: reader.systemPIDs, fetchOriginalTitles: false, trackMotion: true)
+            let session = currentSession
+            DispatchQueue.main.async {
+                self.overlay.show(outcome.labels, session: session)
+                self.state = .showing
+            }
+            schedule(after: Self.openInterval, generation: generation)
+            return
+        }
         let stable = LayoutStability.isStable(previousSnapshot, snapshot)
         stableCount = stable ? stableCount + 1 : 1
         previousSnapshot = snapshot
