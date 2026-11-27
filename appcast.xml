@@ -4,16 +4,16 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>Rium Notch</title>
         <item>
-            <title>0.2.22</title>
-            <pubDate>Fri, 27 Nov 2026 16:17:59 +0900</pubDate>
-            <sparkle:version>0.2.22</sparkle:version>
-            <sparkle:shortVersionString>0.2.22</sparkle:shortVersionString>
+            <title>0.2.23</title>
+            <pubDate>Fri, 27 Nov 2026 17:05:17 +0900</pubDate>
+            <sparkle:version>0.2.23</sparkle:version>
+            <sparkle:shortVersionString>0.2.23</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/contentriumkorea/rium-notch/releases/download/v0.2.22/Rium-Notch-macOS-arm64-unsigned.dmg" length="8128713" type="application/octet-stream" sparkle:edSignature="EHTlipldkRfePOsi1xYo5DuxdmiT9XOMwwCL2u6JFiw7HT5QqWdYqEuZkgS4n2RaN9sAaD7O+0z5ZG0n/1eXCA=="></enclosure>
+            <enclosure url="https://github.com/contentriumkorea/rium-notch/releases/download/v0.2.23/Rium-Notch-macOS-arm64-unsigned.dmg" length="8226921" type="application/octet-stream" sparkle:edSignature="sGy6rZObkimlwdPUo22ciltaohgbH2bu5hdpRa+W1npFZQJPFyxjKLGEA7qolrYsC7BR3ln+dHVXXNJjM/RxAw=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: iwZDVT6rCjRneHudAdWRSg6my5HPoDwvZC9qla7g4FFIrJHurDdss+tXIRHmi6NcBDWVnsFAQ+8jlkPTuHvvBQ==
+edSignature: TTdSkDz7AFbD70GrDsWChL9vbIuj3IXLIHVIGk6D4R3xR6BTEM62oXjfZnCtSxSVmjlMWM9DQpbPUYfmDSHHDQ==
 length: 1157
 -->
