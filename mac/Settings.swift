@@ -107,6 +107,10 @@ struct SettingsView: View {
     @AppStorage(agentSwitcherShortcutPreference) private var agentSwitcherShortcutEnabled = false
     @AppStorage("rium.card.style") private var cardStyle = "liquid"
     @AppStorage("rium.light.style") private var lightStyle = "classic"
+    @AppStorage("rium.missionControl.enabled") private var missionControlLabelsEnabled = true
+    @AppStorage("rium.missionControl.labelAnchor") private var missionControlLabelAnchor = "center"
+    @AppStorage("rium.missionControl.labelOrder") private var missionControlLabelOrder = "titleFirst"
+    @AppStorage("rium.missionControl.showAppIcon") private var missionControlLabelIcon = false
     @AppStorage("rium.light.baseColor") private var lightBaseColor = NotchLightColor.defaultRGB
     @AppStorage("rium.light.surfaceStyle") private var lightSurfaceStyle = "neon"
     @AppStorage("rium.light.enabled") private var lightEnabled = true
@@ -154,6 +158,7 @@ struct SettingsView: View {
     @State private var deepgramKey = ""
     @State private var interviewKeyStatus = ""
     @State private var deepgramKeyStatus = ""
+    @State private var standaloneLabelsRunning = MissionControlLabelsIntegration.standaloneRunning
 
     init(model: Model, initialPage: String? = nil) {
         self.model = model; self.dictation = model.dictation; self.updater = model.updater; self.musicSpectrum = model.musicSpectrum
@@ -201,6 +206,16 @@ struct SettingsView: View {
             (NSApp.delegate as? AppDelegate)?.configureShortcutMonitor()
         }
         .onChange(of: clipboardLight) { _ in (NSApp.delegate as? AppDelegate)?.configureShortcutMonitor() }
+        .onChange(of: missionControlLabelsEnabled) { _ in (NSApp.delegate as? AppDelegate)?.missionControlLabels.refresh() }
+        .onChange(of: missionControlLabelAnchor) { _ in (NSApp.delegate as? AppDelegate)?.missionControlLabels.refresh() }
+        .onChange(of: missionControlLabelOrder) { _ in (NSApp.delegate as? AppDelegate)?.missionControlLabels.refresh() }
+        .onChange(of: missionControlLabelIcon) { _ in (NSApp.delegate as? AppDelegate)?.missionControlLabels.refresh() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in
+            standaloneLabelsRunning = MissionControlLabelsIntegration.standaloneRunning
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
+            standaloneLabelsRunning = MissionControlLabelsIntegration.standaloneRunning
+        }
         .onChange(of: musicLight) { _ in model.syncMusicSpectrum() }
         .onChange(of: interviewProvider) { _ in interviewKey = ""; interviewKeyStatus = "" }
         .onChange(of: interviewAutoSuggest) { enabled in model.interview.setAutoSuggestEnabled(enabled) }
@@ -344,6 +359,32 @@ struct SettingsView: View {
                     Slider(value: Binding(get: { model.autoHideDelay }, set: { model.setAutoHideDelay($0) }), in: 0.1...3, step: 0.1).accessibilityLabel("자동 닫기 지연")
                     Text(String(format: "%.1f초", model.autoHideDelay)).monospacedDigit().frame(width: 48, alignment: .trailing)
                 }.disabled(!model.autoHideEnabled)
+            }
+            SettingsCard(title: "Mission Control 창 라벨") {
+                Toggle("창 제목과 앱 이름 표시", isOn: $missionControlLabelsEnabled)
+                Text("Mission Control에서 각 창에 이름표를 표시합니다. 손쉬운 사용 권한이 필요합니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if missionControlLabelsEnabled {
+                    Picker("라벨 위치", selection: $missionControlLabelAnchor) {
+                        Text("중앙").tag("center")
+                        Text("왼쪽 위").tag("topLeft")
+                        Text("오른쪽 위").tag("topRight")
+                        Text("왼쪽 아래").tag("bottomLeft")
+                        Text("오른쪽 아래").tag("bottomRight")
+                    }
+                    Picker("표시 순서", selection: $missionControlLabelOrder) {
+                        Text("창 제목 / 앱 이름").tag("titleFirst")
+                        Text("앱 이름 / 창 제목").tag("appFirst")
+                    }
+                    Toggle("앱 아이콘 표시", isOn: $missionControlLabelIcon)
+                    if standaloneLabelsRunning {
+                        Text("기존 Mission Control Labels가 실행 중입니다. 중복 표시를 막기 위해 해당 앱이 종료되면 Rium Notch가 라벨을 표시합니다.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("기존 라벨 앱 종료") {
+                            NSRunningApplication.runningApplications(withBundleIdentifier: MissionControlLabelsIntegration.standaloneBundleID).forEach { $0.terminate() }
+                        }
+                    }
+                }
             }
             SettingsCard(title: "원형 시스템 모니터") {
                 Toggle("노치에 모니터 표시", isOn: Binding(get: { model.usageTrackingEnabled }, set: { model.setUsageTrackingEnabled($0) }))

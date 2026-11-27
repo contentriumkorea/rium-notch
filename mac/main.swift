@@ -10544,6 +10544,7 @@ private final class NotchEffectPanel: NSPanel {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = Model()
+    let missionControlLabels = MissionControlLabelsIntegration()
     var panel: NSPanel!
     private var edgeWavePanel: NSPanel?
     private var cordPanel: NSPanel?
@@ -10590,6 +10591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(CommandLine.arguments.contains("--ui-test") ? .regular : .accessory)
+        missionControlLabels.refresh()
         let lightStyleKey = "rium.light.style"
         let preferences = UserDefaults.standard
         if let style = preferences.string(forKey: lightStyleKey), style != "classic", style != "pixel" {
@@ -11349,6 +11351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refreshTimerNotificationPermission(); model.refreshAgentNotificationPermission(); model.musicSpectrum.retryIfAuthorized()
     }
     func applicationWillTerminate(_ notification: Notification) {
+        missionControlLabels.stop()
         spaceResyncGeneration &+= 1
         screenRetry?.cancel(); screenRetry = nil
         model.observeBrightness(on: nil)
@@ -11394,7 +11397,25 @@ private func publishedReceiveFixture(_ file: URL) -> Progress {
     return progress
 }
 
-if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || CommandLine.arguments.contains("--self-test-render-outward-wave") {
+if CommandLine.arguments.contains("--self-test-mission-control-labels") {
+    let suite = "app.rium.notch.test.mission-control.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { fatalError("test defaults unavailable") }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    MissionControlLabelsIntegration.importStandaloneSettings(["labelAnchor": "topRight", "labelOrder": "appFirst", "showAppIcon": true], into: defaults)
+    precondition(defaults.string(forKey: OverlayController.anchorDefaultsKey) == "topRight")
+    precondition(defaults.string(forKey: OverlayController.orderDefaultsKey) == "appFirst")
+    precondition(defaults.bool(forKey: OverlayController.showAppIconDefaultsKey))
+    defaults.set("bottomLeft", forKey: OverlayController.anchorDefaultsKey)
+    MissionControlLabelsIntegration.importStandaloneSettings(["labelAnchor": "center"], into: defaults)
+    precondition(defaults.string(forKey: OverlayController.anchorDefaultsKey) == "bottomLeft")
+    precondition(MissionControlLabelsIntegration.shouldRun(enabled: true, standaloneRunning: false))
+    precondition(!MissionControlLabelsIntegration.shouldRun(enabled: true, standaloneRunning: true))
+    precondition(!MissionControlLabelsIntegration.shouldRun(enabled: false, standaloneRunning: false))
+    let sessions = SessionCounter(), old = SessionToken(0)
+    sessions.advance()
+    precondition(!sessions.isCurrent(old))
+    print("mission control label integration self-test passed")
+} else if CommandLine.arguments.contains("--self-test-render-perimeter-wave") || CommandLine.arguments.contains("--self-test-render-outward-wave") {
     let environment = ProcessInfo.processInfo.environment
     guard let output = environment["RIUM_RENDER_TEST_PATH"] else { fatalError("render output required") }
     let elapsed = environment["RIUM_WAVE_TEST_TIME"].flatMap(Double.init) ?? 0.6
