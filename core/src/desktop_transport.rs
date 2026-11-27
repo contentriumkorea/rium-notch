@@ -63,6 +63,13 @@ fn peer_is_owner(stream: &UnixStream) -> bool {
     unsafe { getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) == 0 && uid == geteuid() }
 }
 
+fn configure_control_stream(stream: &UnixStream) -> io::Result<()> {
+    // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(250)))
+}
+
 struct Endpoint { directory: PathBuf, socket: PathBuf, record: PathBuf, token: String, created: u64, running: Arc<AtomicBool> }
 impl Drop for Endpoint {
     fn drop(&mut self) {
@@ -95,8 +102,7 @@ impl Endpoint {
                     Err(_) => break,
                 };
                 if !peer_is_owner(&stream) { continue; }
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                if configure_control_stream(&stream).is_err() { continue; }
                 let mut bytes = Vec::new();
                 let read = BufReader::new(&stream).take(CONTROL_LIMIT + 1).read_until(b'\n', &mut bytes);
                 if read.is_err() || bytes.len() as u64 > CONTROL_LIMIT || bytes.last() != Some(&b'\n') { continue; }
@@ -340,6 +346,24 @@ pub fn run_with_official_cli(command: &[String], shutdown: &AtomicBool, official
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_response_exceeding_socket_buffer_is_complete() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.set_nonblocking(true).unwrap();
+        configure_control_stream(&sender).unwrap();
+        let payload = "x".repeat(128 * 1024);
+        let expected = payload.clone();
+        let writer = thread::spawn(move || send_control(&mut sender, &json!({"sessions":payload})));
+        // Let the sender fill the socket before the reader starts: a
+        // nonblocking sender would fail and silently leave a partial frame.
+        thread::sleep(Duration::from_millis(50));
+        let mut received = String::new();
+        BufReader::new(receiver).read_line(&mut received).unwrap();
+        writer.join().unwrap();
+        let response: Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(response["sessions"], expected);
+    }
 
     #[test]
     fn followup_uses_the_owner_thread_and_never_an_ambiguous_turn() {

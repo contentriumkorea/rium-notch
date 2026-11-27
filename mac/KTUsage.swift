@@ -127,6 +127,7 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
     private var restoringSession = false
     private var refreshDue: Date?
     private var autoLoginPending = false
+    private var loginPollSequence = 0
     private var hasSavedAccount: Bool { UserDefaults.standard.bool(forKey: Self.credentialsKey) }
 
     func startIfConnected() {
@@ -270,6 +271,7 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
     }
     func refresh() {
         generation += 1; timer?.invalidate(); refreshDue = nil
+        loginPollSequence += 1
         autoLoginPending = false
         status = "KT 확인 중"
         browser().load(URLRequest(url: Self.balanceURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
@@ -285,14 +287,43 @@ final class KTUsageController: NSObject, ObservableObject, WKNavigationDelegate,
         if host == "accounts.kt.com" {
             timer?.invalidate(); refreshDue = nil; sharedData = nil; status = "KT 로그인 필요"
             if hasSavedAccount && !UserDefaults.standard.bool(forKey: Self.retryBlockedKey) {
-                if url.path == "/wamui/AthMobile.do" {
-                    webView.evaluateJavaScript("Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '아이디 로그인')?.click()")
-                } else if url.path == "/login/id" { attemptAutoLogin(in: webView) }
+                loginPollSequence += 1
+                pollLoginPage(in: webView, generation: generation, sequence: loginPollSequence, attempts: 60)
             }
             return
         }
         guard host == "m.my.kt.com", url.path == "/s_main.jsp" else { return }
+        loginPollSequence += 1
         generation += 1; checkRows(in: webView, generation: generation, attempts: 12)
+    }
+    private func pollLoginPage(in webView: WKWebView, generation: Int, sequence: Int, attempts: Int) {
+        guard generation == self.generation, sequence == loginPollSequence, hasSavedAccount,
+              !UserDefaults.standard.bool(forKey: Self.retryBlockedKey), let url = webView.url,
+              url.scheme == "https", url.host == "accounts.kt.com", url.port == nil || url.port == 443 else { return }
+        let script = """
+        (() => {
+          if (window !== window.top || location.origin !== 'https://accounts.kt.com') return 'unavailable';
+          if (location.pathname === '/login/id') {
+            return document.querySelector('input#id[name=id][type=text]') &&
+                   document.querySelector('input#password[name=password][type=password]') &&
+                   document.querySelector('button[type=submit][aria-label="로그인"]') ? 'ready' : 'wait';
+          }
+          if (location.pathname === '/wamui/AthMobile.do') {
+            const button = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '아이디 로그인');
+            if (button && !button.disabled) { button.click(); return 'opening'; }
+          }
+          return 'wait';
+        })()
+        """
+        webView.evaluateJavaScript(script) { [weak self, weak webView] value, _ in
+            guard let self, let webView, generation == self.generation, sequence == self.loginPollSequence else { return }
+            if value as? String == "ready" { self.attemptAutoLogin(in: webView); return }
+            guard attempts > 1 else { self.status = "KT 로그인 확인 필요"; return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.pollLoginPage(in: webView, generation: generation, sequence: sequence, attempts: attempts - 1)
+            }
+        }
     }
     private func checkRows(in webView: WKWebView, generation: Int, attempts: Int) {
         guard generation == self.generation, webView.url?.host?.lowercased() == "m.my.kt.com",
